@@ -1,0 +1,22 @@
+[project]
+name = "batch2go-analysis"
+version = "0.1.0"
+description = "Offline analysis of batch2go run bundles: archive ingestion, schema validation, gate reports."
+requires-python = ">=3.11"
+dependencies = [
+    "polars>=1.0",
+    "pyarrow>=16.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/batch2go_analysis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
