@@ -1,0 +1,145 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "naiveecho_k8_p65536",
+      "bytes": 264628,
+      "digest": "sha256:dfdb0ad193dac92ec920ad99a9d8d504c41452c9b311bf14cfede63faa01f0f6",
+      "generator": {
+        "ir_version": 9,
+        "opset": 17,
+        "producer": "batch2go-modelgen",
+        "producer_version": "1"
+      },
+      "graph": {
+        "feature_width": 256,
+        "kappa": 8,
+        "kappa_semantics": "repeated-block count, dimensionless (ADR-0002)",
+        "payload_floats": 65536,
+        "payload_mib": 0.25
+      },
+      "io": {
+        "inputs": [
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              256
+            ],
+            "name": "data"
+          },
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              65536
+            ],
+            "name": "padding"
+          },
+          {
+            "data_type": "INT64",
+            "dims": [
+              "N",
+              1
+            ],
+            "name": "uid"
+          }
+        ],
+        "outputs": [
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              256
+            ],
+            "name": "data_out"
+          },
+          {
+            "data_type": "INT64",
+            "dims": [
+              "N",
+              1
+            ],
+            "name": "uid_set"
+          }
+        ]
+      },
+      "kappa_profile": {
+        "measured_on": null,
+        "realized_ms": null
+      },
+      "membership_evidence": "own_uid_echo",
+      "precision": "fp32"
+    },
+    {
+      "artifact_id": "synthetic_k8_p65536",
+      "bytes": 264966,
+      "digest": "sha256:87a859763e0236fc0c677e5e311b3661b947aabb36db301674df696b8ded12dd",
+      "generator": {
+        "ir_version": 9,
+        "opset": 17,
+        "producer": "batch2go-modelgen",
+        "producer_version": "1"
+      },
+      "graph": {
+        "feature_width": 256,
+        "kappa": 8,
+        "kappa_semantics": "repeated-block count, dimensionless (ADR-0002)",
+        "payload_floats": 65536,
+        "payload_mib": 0.25
+      },
+      "io": {
+        "inputs": [
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              256
+            ],
+            "name": "data"
+          },
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              65536
+            ],
+            "name": "padding"
+          },
+          {
+            "data_type": "INT64",
+            "dims": [
+              "N",
+              1
+            ],
+            "name": "uid"
+          }
+        ],
+        "outputs": [
+          {
+            "data_type": "FP32",
+            "dims": [
+              "N",
+              256
+            ],
+            "name": "data_out"
+          },
+          {
+            "data_type": "INT64",
+            "dims": [
+              "N",
+              "N"
+            ],
+            "name": "uid_set"
+          }
+        ]
+      },
+      "kappa_profile": {
+        "measured_on": null,
+        "realized_ms": null
+      },
+      "membership_evidence": "self_attesting",
+      "precision": "fp32"
+    }
+  ],
+  "schema_version": 1
+}
