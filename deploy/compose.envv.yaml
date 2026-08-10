@@ -1,0 +1,74 @@
+# Environment V — the local validation stack.
+#
+# Env V validates the apparatus; it never testifies. WSL2's virtualized clock,
+# NAT networking, and laptop thermal behavior are disqualifying for claims, and
+# that is recorded up front rather than discovered later (M2-PLAN §7.3). Timing
+# measured here is a correctness check, never a performance result.
+#
+# The image is pinned by digest, not by tag: a tag can be repointed, and then the
+# server that produced a result is no longer the server anyone can rebuild.
+
+name: batch2go-envv
+
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver@${TRITON_DIGEST:-sha256:f76300c73eba7dd4c67183210c10b3fef67fb9aa2c18f150cb916387078442f0}
+    container_name: batch2go-triton
+    command:
+      - tritonserver
+      - --model-repository=/models
+      # Explicit model control: nothing loads on its own. The runner loads exactly
+      # the entry the manifest names, after verifying its digest (ARCHITECTURE §9).
+      - --model-control-mode=explicit
+      - --grpc-port=8001
+      - --http-port=8000
+      - --metrics-port=8002
+      - --allow-metrics=true
+      # Tracing supplies the three backend timestamps of the schema
+      # (t_queue_start, t_compute_start, t_compute_end). Its overhead is
+      # treatment-correlated and is calibrated and frozen in a later slice
+      # (M2-PLAN §4.4); recording starts now.
+      - --trace-config=mode=triton
+      - --trace-config=level=TIMESTAMPS
+      # rate=1 is load-bearing, not a default. Triton's count-exhaustion write
+      # path is conditioned on (collected == sampled), which can only hold at
+      # rate 1 — and more importantly, sampling would make evidence incomplete
+      # by construction.
+      - --trace-config=rate=1
+      - --trace-config=count=-1
+      - --trace-config=triton,file=/traces/trace.json
+      # log-frequency is set HERE, at startup, and must never be 0 in the
+      # server's life. When it is 0, Triton's end-of-settings flush appends to
+      # the base trace.json instead of an indexed file — and the base file is an
+      # ofstream that stays open, so on disk it is empty until shutdown and
+      # truncated mid-buffer before that. Non-zero from the first instant means
+      # every flush lands in a closed, complete, indexed file (ADR-0008).
+      - --trace-config=triton,log-frequency=4096
+      - --log-verbose=0
+    volumes:
+      # The runtime model repository is materialized fresh per run from
+      # digest-verified artifacts; read-only here so the server cannot alter it.
+      - ${BATCH2GO_MODELS_DIR:-../results/runtime-models}:/models:ro
+      - ${BATCH2GO_TRACES_DIR:-../results/triton-traces}:/traces
+    ports:
+      # Loopback only. No profile in this repository opens a public port.
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:8002:8002"
+    shm_size: 1gb
+    ulimits:
+      stack: 67108864
+      memlock: -1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000 && printf 'GET /v2/health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q 200"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
