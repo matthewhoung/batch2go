@@ -1,0 +1,121 @@
+// Package individual is the executor for the V=off cells: D0, F00 and F10.
+//
+// It is a thin policy over the shared single-request submission engine. F00 and
+// F10 resolve to this same constructor, the same gRPC client and channel, and
+// the same model entry — which is what makes their contrast an envelope contrast
+// rather than a comparison of two client implementations (M1 Rev 4 decision 1).
+package individual
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"syscall"
+
+	"github.com/matthewhoung/batch2go/internal/executor"
+	"github.com/matthewhoung/batch2go/internal/identity"
+	"github.com/matthewhoung/batch2go/internal/triton"
+)
+
+// Executor submits each member as its own single-item request to the unbatched
+// entry.
+type Executor struct {
+	submitter *triton.Submitter
+	now       executor.Clock
+}
+
+// New builds the individual executor over a shared submission engine.
+func New(submitter *triton.Submitter, now executor.Clock) (*Executor, error) {
+	if submitter == nil {
+		return nil, fmt.Errorf("executor/individual: needs a submission engine")
+	}
+	if now == nil {
+		return nil, fmt.Errorf("executor/individual: needs a clock reader")
+	}
+	return &Executor{submitter: submitter, now: now}, nil
+}
+
+// Execute submits the dispatch's members.
+//
+// At n=1 — every envelope at A=off — this is one submission. At n=B the members
+// are submitted concurrently rather than in sequence: at A=off the concurrency
+// arrives from the network as the barrier's B simultaneous envelopes, so at A=on
+// the executor has to recreate it, or the two factor levels would differ in
+// backend serialization as well as in transport (M1 Rev 4 decision 1). Requests
+// are never serialized behind one another inside an executor; the waiting they
+// do belongs to the backend queue, where the cycle model books it.
+func (e *Executor) Execute(ctx context.Context, d executor.Dispatch) (executor.Result, executor.Evidence, error) {
+	if len(d.Members) == 0 {
+		return executor.Result{}, executor.Evidence{}, fmt.Errorf("executor/individual: dispatch carries no members")
+	}
+	if d.Model == "" {
+		return executor.Result{}, executor.Evidence{}, fmt.Errorf("executor/individual: dispatch names no model entry")
+	}
+
+	cpuStart := processCPUNanos()
+	results := make([]executor.MemberResult, len(d.Members))
+
+	var wg sync.WaitGroup
+	for i, member := range d.Members {
+		wg.Add(1)
+		go func(i int, member identity.LogicalRequest) {
+			defer wg.Done()
+
+			res := executor.MemberResult{Member: member}
+			res.DispatchedAt = e.now()
+			out, err := e.submitter.Submit(ctx, d.Model, []identity.LogicalRequest{member})
+			res.ResultAt = e.now()
+
+			if err != nil {
+				res.Err = err
+			} else {
+				res.Membership = out.Membership
+				res.BatchSize = out.BatchSize
+				res.DataOutBytes = out.DataOutBytes
+			}
+			results[i] = res
+		}(i, member)
+	}
+	wg.Wait()
+
+	evidence := executor.Evidence{
+		Dispatched:        len(d.Members),
+		DispatchSkewNanos: dispatchSkew(results),
+		CPUNanos:          processCPUNanos() - cpuStart,
+	}
+	return executor.Result{Members: results}, evidence, nil
+}
+
+// dispatchSkew is first-to-last submit across a fan-out. Contract tests bound it
+// well below one execution's service time, which is what establishes that a
+// fan-out cell's members really did arrive at the backend together.
+func dispatchSkew(results []executor.MemberResult) int64 {
+	if len(results) < 2 {
+		return 0
+	}
+	first, last := results[0].DispatchedAt, results[0].DispatchedAt
+	for _, r := range results[1:] {
+		if r.DispatchedAt < first {
+			first = r.DispatchedAt
+		}
+		if r.DispatchedAt > last {
+			last = r.DispatchedAt
+		}
+	}
+	return last - first
+}
+
+// processCPUNanos reads the process's consumed CPU time. It is the adapter's own
+// cost for a dispatch, which the design requires recorded rather than assumed
+// negligible.
+func processCPUNanos() int64 {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return 0
+	}
+	return timevalNanos(usage.Utime) + timevalNanos(usage.Stime)
+}
+
+func timevalNanos(tv syscall.Timeval) int64 {
+	return tv.Sec*1_000_000_000 + int64(tv.Usec)*1_000
+}

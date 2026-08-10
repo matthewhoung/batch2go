@@ -1,0 +1,147 @@
+// Command proxy runs the shared path's entry point.
+//
+// It is an independently deployable binary so that Env 2 can place it with the
+// load generator on a separate node. This file parses flags and wires
+// components; the pass-through behavior lives in internal/proxy.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	envelopev1 "github.com/matthewhoung/batch2go/api/envelope/v1"
+	"github.com/matthewhoung/batch2go/internal/envelope"
+	"github.com/matthewhoung/batch2go/internal/events"
+	"github.com/matthewhoung/batch2go/internal/events/clockdomain"
+	"github.com/matthewhoung/batch2go/internal/identity"
+	"github.com/matthewhoung/batch2go/internal/proxy"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "proxy: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	listen := flag.String("listen", "127.0.0.1:9100", "address to serve the client protocol on")
+	backend := flag.String("backend", "127.0.0.1:9101", "adapter endpoint")
+	eventsPath := flag.String("events", "", "event record stream to write")
+
+	experiment := flag.String("experiment", "", "experiment id")
+	session := flag.String("session", "", "session id")
+	runID := flag.String("run", "", "run id")
+	cell := flag.String("cell", "", "cell being served")
+	clockDomainID := flag.String("clock-domain", "", "clock domain the run declared")
+	targetB := flag.Int("target-b", 0, "cohort size the run declared")
+
+	maxMessageBytes := flag.Int("max-message-bytes", 256<<20, "gRPC message ceiling")
+	initialWindow := flag.Int("initial-window-size", 4<<20, "gRPC stream flow-control window")
+	initialConnWindow := flag.Int("initial-conn-window-size", 16<<20, "gRPC connection flow-control window")
+	flag.Parse()
+
+	if *eventsPath == "" || *runID == "" || *cell == "" {
+		return fmt.Errorf("proxy needs --events, --run and --cell")
+	}
+	parsedCell, err := identity.ParseCell(*cell)
+	if err != nil {
+		return err
+	}
+
+	clock, err := clockdomain.Establish()
+	if err != nil {
+		return err
+	}
+	if *clockDomainID != "" && string(clock.ID) != *clockDomainID {
+		return fmt.Errorf("proxy is in clock domain %s, the run declared %s; their timestamps cannot be subtracted",
+			clock.ID, *clockDomainID)
+	}
+
+	conn, err := grpc.NewClient(*backend,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(*maxMessageBytes),
+			grpc.MaxCallSendMsgSize(*maxMessageBytes),
+		),
+		grpc.WithInitialWindowSize(int32(*initialWindow)),
+		grpc.WithInitialConnWindowSize(int32(*initialConnWindow)),
+	)
+	if err != nil {
+		return fmt.Errorf("proxy: dial adapter %s: %w", *backend, err)
+	}
+	defer conn.Close()
+
+	builder, err := envelope.NewBuilder(envelope.Config{
+		Experiment:  identity.ExperimentID(*experiment),
+		Session:     identity.SessionID(*session),
+		Run:         identity.RunID(*runID),
+		Cell:        parsedCell,
+		ClockDomain: clock.ID,
+		TargetB:     *targetB,
+	})
+	if err != nil {
+		return err
+	}
+
+	writer, err := events.NewFileWriter(*eventsPath, events.RunHeader{
+		Experiment:  identity.ExperimentID(*experiment),
+		Session:     identity.SessionID(*session),
+		Run:         identity.RunID(*runID),
+		Cell:        parsedCell,
+		ClockDomain: clock.ID,
+		WriterID:    2,
+	})
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+
+	service, err := proxy.New(proxy.Config{
+		Cell:    parsedCell,
+		Run:     identity.RunID(*runID),
+		TargetB: *targetB,
+	}, builder, envelopev1.NewBackendClient(conn), writer, clock.Now)
+	if err != nil {
+		return err
+	}
+
+	lis, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return fmt.Errorf("proxy: listen on %s: %w", *listen, err)
+	}
+	server := grpc.NewServer(
+		grpc.MaxRecvMsgSize(*maxMessageBytes),
+		grpc.MaxSendMsgSize(*maxMessageBytes),
+		grpc.InitialWindowSize(int32(*initialWindow)),
+		grpc.InitialConnWindowSize(int32(*initialConnWindow)),
+	)
+	envelopev1.RegisterProxyServer(server, service)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		server.GracefulStop()
+	}()
+
+	fmt.Fprintf(os.Stderr, "proxy: pass-through for %s on %s -> %s (clock domain %s)\n",
+		parsedCell, *listen, *backend, clock.ID)
+	if err := server.Serve(lis); err != nil {
+		return fmt.Errorf("proxy: serve: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	// The counters live in this process, so they are persisted beside the stream:
+	// a record this service dropped has to remain reportable after it exits.
+	return events.WriteStats(*eventsPath, writer.Stats())
+}

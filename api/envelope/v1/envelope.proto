@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+// Package batch2go.envelope.v1 is the proxy↔adapter transport contract.
+//
+// It is versioned independently of the Triton API, because it is part of the
+// treatment: Factor A is exactly the question of whether a cohort's B logical
+// requests travel in one of these or in B of them. Serialization cost is a
+// declared constituent of the measured effect, so the wire shape is pinned
+// rather than left to convenience (ADR-0003).
+package batch2go.envelope.v1;
+
+option go_package = "github.com/matthewhoung/batch2go/api/envelope/v1;envelopev1";
+
+// Status is one logical request's terminal outcome. A member that failed is
+// reported as failed; it never disappears from the response.
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_OK = 1;
+  STATUS_ERROR = 2;
+  STATUS_TIMEOUT = 3;
+}
+
+// LogicalRequest is one unit of work as the client sees it, carrying the
+// identity minted by the load generator unchanged.
+message LogicalRequest {
+  uint32 cohort_id = 1;
+  uint32 ordinal = 2;
+
+  // uid is what the model consumes and returns tiled, so membership is attested
+  // by the model rather than inferred (ADR-0007). It is derived from the
+  // identity above and carried so the adapter never has to re-derive it.
+  int64 uid = 3;
+
+  // payload is the declared padding input. It is a bytes field so that
+  // serialization is a single copy out of a preallocated buffer, and it travels
+  // every hop because payload size has to be realized on all of them — including
+  // host-to-device staging, which is why the model consumes it rather than the
+  // adapter stripping it (M1 §4).
+  bytes payload = 4;
+}
+
+// RequestEnvelope is one transport message from proxy to adapter: one logical
+// request at A=off, a whole cohort at A=on.
+message RequestEnvelope {
+  uint32 schema_version = 1;
+
+  string experiment_id = 2;
+  string session_id = 3;
+  string run_id = 4;
+  string cell = 5;
+  string clock_domain_id = 6;
+
+  uint32 cohort_id = 7;
+  uint64 envelope_id = 8;
+
+  // The assigned factor levels. They are carried so the adapter acts on what the
+  // manifest declared rather than on what the envelope's shape suggests: a
+  // one-request envelope is not evidence of A=off.
+  bool aggregate = 9;
+  bool vectorize = 10;
+
+  // target_b is the cohort size the run declared, and expected_members what this
+  // envelope should contain. The adapter validates one against the other rather
+  // than trusting the count it happens to receive.
+  uint32 target_b = 11;
+  uint32 expected_members = 12;
+
+  repeated LogicalRequest requests = 13;
+
+  // t_proxy_send is the proxy's own monotonic timestamp at the moment of send,
+  // and t_cohort_seal is carried only at A=on, where the proxy owns the seal. At
+  // A=off the proxy does no joining and emits no seal (ADR-0001).
+  int64 t_proxy_send = 14;
+  optional int64 t_cohort_seal = 15;
+
+  // Byte accounting, measured rather than assumed.
+  uint64 logical_bytes = 16;
+  uint64 auxiliary_bytes = 17;
+}
+
+// LogicalResult is one member's outcome and the evidence its execution produced.
+message LogicalResult {
+  uint32 cohort_id = 1;
+  uint32 ordinal = 2;
+  Status status = 3;
+  string error = 4;
+
+  // membership_uids is the complete uid set the execution attested to, and
+  // batch_size its realized shape. Both are evidence; neither is a conclusion.
+  repeated int64 membership_uids = 5 [packed = true];
+  uint32 batch_size = 6;
+  uint64 data_out_bytes = 7;
+}
+
+// AdapterEvidence is what the adapter observed about its own dispatch. It never
+// includes a conclusion about conformance, which the validator computes offline.
+message AdapterEvidence {
+  uint32 dispatched = 1;
+
+  // dispatch_skew_nanos is first-to-last submit within one fan-out call. It is
+  // meaningful only when the adapter released more than one member at once, and
+  // is recorded as zero otherwise rather than omitted.
+  int64 dispatch_skew_nanos = 2;
+  int64 cpu_nanos = 3;
+}
+
+// ResponseEnvelope carries the same identity back, with per-member results.
+message ResponseEnvelope {
+  uint32 schema_version = 1;
+  string run_id = 2;
+  uint32 cohort_id = 3;
+  uint64 envelope_id = 4;
+
+  repeated LogicalResult results = 5;
+  AdapterEvidence evidence = 6;
+
+  int64 t_adapter_recv = 7;
+  int64 t_adapter_send = 8;
+}
+
+// Backend is the adapter's service. One method: the adapter terminates the
+// envelope protocol and returns results. It never joins or synchronizes at
+// A=off — envelopes are dispatched on arrival (ADR-0001).
+service Backend {
+  rpc Execute(RequestEnvelope) returns (ResponseEnvelope) {}
+}
+
+// ClientRequest is what the load generator sends to the proxy: one logical
+// request over one stable client protocol, whatever the cell's Factor A level.
+// The proxy, not the client, decides whether requests share an envelope.
+message ClientRequest {
+  string run_id = 1;
+  uint32 cohort_id = 2;
+  uint32 ordinal = 3;
+  int64 uid = 4;
+  bytes payload = 5;
+
+  // t_cohort_seal is the barrier release instant, carried at A=off because the
+  // load generator owns the seal there and the proxy records it on the client's
+  // behalf (ADR-0001).
+  optional int64 t_cohort_seal = 6;
+}
+
+// ClientResponse is one logical request's result as the client sees it.
+message ClientResponse {
+  uint32 cohort_id = 1;
+  uint32 ordinal = 2;
+  Status status = 3;
+  string error = 4;
+  repeated int64 membership_uids = 5 [packed = true];
+  uint32 batch_size = 6;
+  uint64 data_out_bytes = 7;
+}
+
+// Proxy is the load generator's entry to the shared path.
+service Proxy {
+  rpc Submit(ClientRequest) returns (ClientResponse) {}
+}
