@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/testkit"
 	"github.com/matthewhoung/batch2go/internal/validate"
@@ -21,6 +22,7 @@ import (
 func injectedDelays() map[string]time.Duration {
 	return map[string]time.Duration{
 		validate.StageWForm:         37 * time.Microsecond,
+		validate.StageBarrierWait:   41 * time.Microsecond,
 		validate.StageReleaseToSend: 53 * time.Microsecond,
 		validate.StageXReq:          211 * time.Microsecond,
 		validate.StageXReqHop1:      149 * time.Microsecond,
@@ -76,6 +78,22 @@ func TestSelfTestRecoversEveryInjectedDelay(t *testing.T) {
 
 				want := int64(spec.Delay(span.Name))
 				tolerance := int64(float64(want) * spec.ToleranceFraction)
+
+				// Q_backend is the one stage that legitimately varies across a
+				// cohort: it absorbs the wait behind earlier executions on the single
+				// model instance (M1 §2.2). Its floor is the injected value — the
+				// first member waits for nobody — and its spread is the serialization.
+				if span.Name == validate.StageQBackend {
+					if diff := summary.MinNanos - want; diff > tolerance || diff < -tolerance {
+						t.Errorf("Q_backend min = %dns, injected %dns; the first member of a cohort waits behind nobody",
+							summary.MinNanos, want)
+					}
+					if summary.MaxNanos <= summary.MinNanos {
+						t.Error("Q_backend does not vary across a cohort; the serialization wait went somewhere else")
+					}
+					continue
+				}
+
 				for _, got := range []struct {
 					label string
 					value int64
@@ -98,7 +116,7 @@ func TestSelfTestRecoversEveryInjectedDelay(t *testing.T) {
 // nothing else. This is what separates "the arithmetic closes" from "the
 // decomposition attributes time correctly".
 func TestChangingOneInjectedDelayMovesOnlyThatStage(t *testing.T) {
-	const bumped = validate.StageQBackend
+	const bumped = validate.StageSComp
 	const bump = 5 * time.Millisecond
 
 	base := specWithInjectedDelays(identity.CellF00).MustBuild()
@@ -121,6 +139,14 @@ func TestChangingOneInjectedDelayMovesOnlyThatStage(t *testing.T) {
 		if span.Name == bumped {
 			if delta != int64(bump) {
 				t.Errorf("%s moved by %dns, want %dns", span.Name, delta, int64(bump))
+			}
+			continue
+		}
+		if span.Name == validate.StageQBackend {
+			// A longer execution makes later members wait longer, by construction.
+			// That the increase lands here and nowhere else is the point.
+			if delta <= 0 {
+				t.Error("Q_backend did not absorb the extra serialization wait a longer S_comp creates")
 			}
 			continue
 		}
@@ -233,8 +259,10 @@ func TestUnaccountedTimeBeyondToleranceFailsTheRun(t *testing.T) {
 			t.Errorf("%v: residual %+dns, want %+dns", rc.Request, rc.ResidualNanos, wantResidual)
 		}
 		// And it must not have been quietly folded into a neighbouring stage.
-		if got, want := rc.Stages[validate.StageQBackend], int64(injectedDelays()[validate.StageQBackend]); got != want {
-			t.Errorf("%v: Q_backend = %dns, want %dns — unaccounted time leaked into a named stage",
+		// S_comp is checked rather than Q_backend because Q_backend legitimately
+		// varies with a member's position behind earlier executions.
+		if got, want := rc.Stages[validate.StageSComp], int64(injectedDelays()[validate.StageSComp]); got != want {
+			t.Errorf("%v: S_comp = %dns, want %dns — unaccounted time leaked into a named stage",
 				rc.Request, got, want)
 		}
 	}
@@ -290,5 +318,72 @@ func TestVerdictIsReproducible(t *testing.T) {
 	}
 	if first.Conservation.MaxAbsResidualNanos != second.Conservation.MaxAbsResidualNanos {
 		t.Error("conservation residuals differ between runs of the same input")
+	}
+}
+
+// W_form is the cycle model's formation term and belongs to the proxy. The load
+// generator's barrier wait is a different quantity that happens to sit between
+// the same two timestamps at A=off.
+//
+// They were the same name once, and nothing caught it: a delivered D0 bundle —
+// a cell with no proxy at all — reported a W_form median of 68 microseconds,
+// while M1 §2.2's stage table gives D0 a dash in that row. One archive column
+// meant two unrelated things, keyed by a cell label no check consulted. This is
+// the check.
+func TestFormationAndBarrierWaitAreNeverTheSameName(t *testing.T) {
+	for _, cell := range identity.AllCells() {
+		spans, err := validate.Chain(cell)
+		if err != nil {
+			continue // cells with no chain yet
+		}
+
+		var hasFormation, hasBarrierWait bool
+		for _, s := range spans {
+			switch s.Name {
+			case validate.StageWForm:
+				hasFormation = true
+				if s.Start != events.StageProxyRecv {
+					t.Errorf("%s: W_form starts at %s; formation is measured at the proxy, from the member's arrival",
+						cell, s.Start)
+				}
+			case validate.StageBarrierWait:
+				hasBarrierWait = true
+				if s.Start != events.StageSched {
+					t.Errorf("%s: barrier_wait starts at %s, want t_sched", cell, s.Start)
+				}
+			}
+		}
+
+		if hasFormation && hasBarrierWait {
+			t.Errorf("%s carries both W_form and barrier_wait; no cell has both", cell)
+		}
+		if want := cell.AggregatesEnvelopes(); hasFormation != want {
+			t.Errorf("%s: W_form present = %v, but the cell aggregates = %v — formation exists exactly where the proxy assembles a cohort",
+				cell, hasFormation, want)
+		}
+		if hasBarrierWait == cell.AggregatesEnvelopes() {
+			t.Errorf("%s: barrier_wait present = %v for an aggregating = %v cell; the generator's wait is the A=off quantity",
+				cell, hasBarrierWait, cell.AggregatesEnvelopes())
+		}
+	}
+}
+
+// Neither quantity may enter the conserved sum: both sit before the client send,
+// which is where the conservation identity starts (M2-PLAN §4.3).
+func TestPreSendQuantitiesAreNeverAccounted(t *testing.T) {
+	for _, cell := range identity.AllCells() {
+		spans, err := validate.Chain(cell)
+		if err != nil {
+			continue
+		}
+		for i, s := range spans {
+			if !validate.PreCycle(spans, i) {
+				continue
+			}
+			if s.Accounted {
+				t.Errorf("%s: %s is before the client send but marked accounted; it would be summed into a cycle it is not part of",
+					cell, s.Name)
+			}
+		}
 	}
 }

@@ -13,24 +13,25 @@ import (
 type DefectKind string
 
 const (
-	DefectMissingTimestamp   DefectKind = "missing_timestamp"
-	DefectUnexpectedStage    DefectKind = "unexpected_stage_for_topology"
-	DefectNonMonotonic       DefectKind = "non_monotonic_timestamps"
-	DefectCrossClockDomain   DefectKind = "cross_clock_domain_subtraction"
-	DefectMembershipMismatch DefectKind = "membership_mismatch"
-	DefectOwnUIDEcho         DefectKind = "own_uid_echo"
-	DefectTruncatedEvidence  DefectKind = "truncated_membership_evidence"
-	DefectCoalescedSingles   DefectKind = "coalesced_singles"
-	DefectAdapterWaiting     DefectKind = "adapter_waiting_at_a_off"
-	DefectStageOwnership     DefectKind = "stage_written_by_wrong_emitter"
-	DefectMembershipDisagree DefectKind = "membership_sources_disagree"
-	DefectExecutionCount     DefectKind = "execution_count_mismatch"
-	DefectDroppedRecords     DefectKind = "dropped_records"
-	DefectMissingRequest     DefectKind = "missing_request"
-	DefectDuplicateRecord    DefectKind = "duplicate_record"
-	DefectConservation       DefectKind = "conservation_residual_exceeds_tolerance"
-	DefectSchemaVersion      DefectKind = "schema_version_mismatch"
-	DefectRequestFailed      DefectKind = "request_failed"
+	DefectMissingTimestamp      DefectKind = "missing_timestamp"
+	DefectUnexpectedStage       DefectKind = "unexpected_stage_for_topology"
+	DefectNonMonotonic          DefectKind = "non_monotonic_timestamps"
+	DefectCrossClockDomain      DefectKind = "cross_clock_domain_subtraction"
+	DefectMembershipMismatch    DefectKind = "membership_mismatch"
+	DefectOwnUIDEcho            DefectKind = "own_uid_echo"
+	DefectTruncatedEvidence     DefectKind = "truncated_membership_evidence"
+	DefectCoalescedSingles      DefectKind = "coalesced_singles"
+	DefectAdapterWaiting        DefectKind = "adapter_waiting_at_a_off"
+	DefectStageOwnership        DefectKind = "stage_written_by_wrong_emitter"
+	DefectOverlappingExecutions DefectKind = "executions_overlapped_on_one_instance"
+	DefectMembershipDisagree    DefectKind = "membership_sources_disagree"
+	DefectExecutionCount        DefectKind = "execution_count_mismatch"
+	DefectDroppedRecords        DefectKind = "dropped_records"
+	DefectMissingRequest        DefectKind = "missing_request"
+	DefectDuplicateRecord       DefectKind = "duplicate_record"
+	DefectConservation          DefectKind = "conservation_residual_exceeds_tolerance"
+	DefectSchemaVersion         DefectKind = "schema_version_mismatch"
+	DefectRequestFailed         DefectKind = "request_failed"
 )
 
 // Defect is one named finding, attached to the request it concerns where there
@@ -69,6 +70,10 @@ type Verdict struct {
 	// Conservation carries the residuals whether or not they passed. A residual
 	// is reported signed and never relabeled (M1 §4).
 	Conservation ConservationReport `json:"conservation"`
+
+	// Executions is the cohort-level account of how the model executions were laid
+	// out in time — the check that can fail where interval coverage could not.
+	Executions ExecutionReport `json:"executions"`
 }
 
 // Defects flattens every finding, most structural first.
@@ -240,6 +245,10 @@ func Validate(exp Expectation, records []events.Decoded) Verdict {
 	conservation, check := checkConservation(exp, joined)
 	v.Conservation = conservation
 	v.Checks = append(v.Checks, check)
+
+	executions, execCheck := checkExecutionSerialization(exp, joined)
+	v.Executions = executions
+	v.Checks = append(v.Checks, execCheck)
 
 	v.Passed = true
 	for _, c := range v.Checks {

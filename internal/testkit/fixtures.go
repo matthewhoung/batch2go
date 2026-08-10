@@ -45,6 +45,16 @@ type Spec struct {
 	CohortGap     time.Duration
 	MemberStagger time.Duration
 
+	// InterExecutionGap separates consecutive model executions within a cohort.
+	//
+	// A V=off cohort's B executions serialize on the single model instance —
+	// request i waits behind requests 0..i-1, and that wait is what the cycle
+	// model books in Q_backend (M1 §2.2). A fixture that let the executions run in
+	// parallel would model a machine this design does not have, and every offline
+	// assertion about backend timing would be checked against evidence no run
+	// could produce.
+	InterExecutionGap time.Duration
+
 	ToleranceFraction float64
 }
 
@@ -62,6 +72,7 @@ const DefaultStageDelay = 100 * time.Microsecond
 func defaultStageDelays() map[string]time.Duration {
 	return map[string]time.Duration{
 		"W_form":          30 * time.Microsecond,
+		"barrier_wait":    30 * time.Microsecond,
 		"A_pack":          150 * time.Microsecond,
 		"X_req":           200 * time.Microsecond,
 		"X_req_hop1":      200 * time.Microsecond,
@@ -93,6 +104,7 @@ func NewSpec(cell identity.Cell) Spec {
 		StageDelays:       defaultStageDelays(),
 		CohortGap:         50 * time.Millisecond,
 		MemberStagger:     200 * time.Microsecond,
+		InterExecutionGap: 100 * time.Microsecond,
 		ToleranceFraction: 0.05,
 	}
 }
@@ -142,6 +154,9 @@ func (s Spec) Build() (Bundle, error) {
 		cohortID := s.FirstCohortID + identity.CohortID(c)
 		cohortStart := s.BaseInstant + int64(c)*int64(s.CohortGap)
 
+		// prevComputeEnd carries the serialization forward: member i cannot begin
+		// executing until member i-1 has finished on the one model instance.
+		var prevComputeEnd int64
 		for o := 0; o < s.CohortSize; o++ {
 			req := identity.LogicalRequest{Cohort: cohortID, Ordinal: identity.Ordinal(o)}
 
@@ -153,6 +168,16 @@ func (s Spec) Build() (Bundle, error) {
 				now += int64(s.Delay(span.Name))
 				ts[span.End] = now
 			}
+
+			if batchSize == 1 && o > 0 {
+				// Push this member's execution behind the previous one, absorbing the
+				// wait into Q_backend and leaving every other stage's duration
+				// untouched — which is exactly where M1 §2.2 books it.
+				if wait := prevComputeEnd + int64(s.InterExecutionGap) - ts[events.StageComputeStart]; wait > 0 {
+					shiftFrom(ts, events.StageComputeStart, wait)
+				}
+			}
+			prevComputeEnd = ts[events.StageComputeEnd]
 
 			membership := s.membership(req, batchSize)
 			records = append(records, s.splitByEmitter(req, ts, membership, batchSize)...)
@@ -180,6 +205,21 @@ func (s Spec) Build() (Bundle, error) {
 			BatchSizeHistogram:          map[uint64]uint64{uint64(batchSize): uint64(executions)},
 		},
 	}, nil
+}
+
+// shiftFrom moves stage and everything after it later by delta, so the interval
+// ending at stage stretches and every later interval keeps its duration.
+//
+// V=on cells are not handled here: a vectorized cohort executes once, so all B
+// members share one execution window rather than serializing. Building that is
+// owned by the testkit work of spec 0002; until then no V=on cell runs, and the
+// serialization check skips them.
+func shiftFrom(ts map[events.Stage]int64, from events.Stage, delta int64) {
+	for stage := range ts {
+		if stage >= from {
+			ts[stage] += delta
+		}
+	}
 }
 
 // MustBuild is Build for tests that have no meaningful way to handle failure.

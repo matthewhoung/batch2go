@@ -156,22 +156,23 @@ func checkConservation(exp Expectation, joined map[identity.LogicalRequest]*Join
 	}
 
 	report.Stages = summarize(spans, samples)
+
+	// Cohort intervals are measured and reported, but coverage is NOT a pass
+	// criterion. Under fixed-cohort release the members' in-flight intervals
+	// always overlap, so their union is one contiguous span identically equal to
+	// the makespan: uncovered time was zero in every cohort of every run ever
+	// made, whatever the input. The cohort-level test that can fail is the
+	// execution-serialization check; what is reported here is the overlap
+	// structure itself, which is informative and makes no claim.
 	report.Cohorts = cohortCoverage(exp, joined, first, last)
 	for _, c := range report.Cohorts {
 		if c.UncoveredFrac > report.MaxUncoveredMakespanFrac {
 			report.MaxUncoveredMakespanFrac = c.UncoveredFrac
 		}
-		if c.UncoveredFrac > exp.ToleranceFraction {
-			defects = append(defects, Defect{
-				Kind: DefectConservation,
-				Message: fmt.Sprintf("cohort %d: %dns of a %dns makespan (%.2f%%) is covered by no member's in-flight interval",
-					c.Cohort, c.UncoveredNanos, c.MakespanNanos, c.UncoveredFrac*100),
-			})
-		}
 	}
 
-	detail := fmt.Sprintf("max |residual| %.4f%% of path, max uncovered makespan %.4f%%, tolerance %.2f%%",
-		report.MaxAbsResidualFraction*100, report.MaxUncoveredMakespanFrac*100, exp.ToleranceFraction*100)
+	detail := fmt.Sprintf("max |residual| %.4f%% of path, tolerance %.2f%% (cohort intervals reported, not gated)",
+		report.MaxAbsResidualFraction*100, exp.ToleranceFraction*100)
 	return report, fail("conservation", defects, detail)
 }
 

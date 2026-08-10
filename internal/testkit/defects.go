@@ -335,3 +335,43 @@ func (b Bundle) WithMembershipOnlyFromOneSource(keep identity.Emitter) Bundle {
 	}
 	return out
 }
+
+// WithOverlappingExecutions makes a cohort's model executions run in parallel.
+//
+// This is what a second model instance, or a scheduler that stopped serializing,
+// would look like. It matters because it is invisible to every other check: the
+// execution count, the batch-size histogram, the attested membership and the
+// per-request residual are all unchanged. Only the cohort-level layout betrays
+// it — and the wait the cycle model books in Q_backend would be describing a
+// queue that was not there (M1 §2.2).
+func (b Bundle) WithOverlappingExecutions() Bundle {
+	out := b.Clone()
+
+	// Give every member of the first cohort the same execution window.
+	req := out.FirstRequest()
+	var start, end int64
+	for _, d := range out.Records {
+		if d.Record.Request() != req {
+			continue
+		}
+		if s, ok := d.Record.Stage(events.StageComputeStart); ok {
+			start = s
+		}
+		if e, ok := d.Record.Stage(events.StageComputeEnd); ok {
+			end = e
+		}
+	}
+	for i, d := range out.Records {
+		if d.Record.Cohort != req.Cohort {
+			continue
+		}
+		rec := d.Record
+		if _, ok := rec.Stage(events.StageComputeStart); !ok {
+			continue
+		}
+		rec.SetStage(events.StageComputeStart, start)
+		rec.SetStage(events.StageComputeEnd, end)
+		out.Records[i].Record = rec
+	}
+	return out
+}

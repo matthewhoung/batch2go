@@ -150,7 +150,7 @@ CHAINS: dict[str, tuple[tuple[str, str, str], ...]] = {
     # The direct path has one transport hop each way, so its transfer terms are
     # not hop-indexed.
     "D0": (
-        ("t_sched", "t_cohort_seal", "W_form"),
+        ("t_sched", "t_cohort_seal", "barrier_wait"),
         ("t_cohort_seal", "t_client_send", "release_to_send"),
         ("t_client_send", "t_queue_start", "X_req"),
         ("t_queue_start", "t_compute_start", "Q_backend"),
@@ -160,7 +160,7 @@ CHAINS: dict[str, tuple[tuple[str, str, str], ...]] = {
     # A=off: the load generator seals at barrier release and the proxy emits none.
     **{
         cell: (
-            ("t_sched", "t_cohort_seal", "W_form"),
+            ("t_sched", "t_cohort_seal", "barrier_wait"),
             ("t_cohort_seal", "t_client_send", "release_to_send"),
             ("t_client_send", "t_proxy_recv", "X_req_hop1"),
             ("t_proxy_recv", "t_proxy_send", "A_pack"),
@@ -168,8 +168,10 @@ CHAINS: dict[str, tuple[tuple[str, str, str], ...]] = {
         + _SHARED_TAIL
         for cell in ("F00", "F01", "F00-seq")
     },
-    # A=on: the proxy seals the envelope after receiving the cohort, so W_form is
-    # measured there.
+    # A=on: the proxy seals the envelope after receiving the cohort, so W_form —
+    # the cycle model's formation term — is measured there. At A=off the
+    # corresponding span is the load generator's own barrier wait, which is a
+    # different quantity and carries a different name.
     **{
         cell: (
             ("t_sched", "t_client_send", "release_to_send"),

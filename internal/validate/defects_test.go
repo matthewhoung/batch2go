@@ -277,3 +277,42 @@ func TestSingleMembershipSourceIsStillJudged(t *testing.T) {
 	}
 	assertNamedDefect(t, broken, validate.DefectMembershipMismatch)
 }
+
+// The cohort-level check that can actually fail.
+//
+// It replaced an interval-coverage test that could not: under fixed-cohort
+// release the members' in-flight intervals always overlap, so their union was
+// identically the makespan and uncovered time was zero for every input. This one
+// tests the cell's declared mechanism instead — one model instance, executions
+// one at a time — and a violation is invisible everywhere else.
+func TestOverlappingExecutionsFail(t *testing.T) {
+	control := testkit.NewSpec(identity.CellF00).MustBuild()
+	if v := validate.Validate(control.Expectation, control.Records); !v.Passed {
+		t.Fatalf("the control fixture serializes and should pass: %v", v.Defects())
+	}
+
+	fixture := control.WithOverlappingExecutions()
+	verdict := assertNamedDefect(t, fixture, validate.DefectOverlappingExecutions)
+
+	// Everything else still looks right, which is the whole point.
+	for _, c := range verdict.Checks {
+		switch c.Name {
+		case "membership", "contamination", "presence_mask", "record_integrity":
+			if !c.Passed {
+				t.Errorf("%s failed too; the overlap should be invisible to it", c.Name)
+			}
+		}
+	}
+}
+
+// A vectorized cohort executes once, so there is nothing to serialize and the
+// check must not invent a finding.
+func TestSerializationCheckSkipsVectorizedCells(t *testing.T) {
+	fixture := testkit.NewSpec(identity.CellF01).MustBuild()
+	verdict := validate.Validate(fixture.Expectation, fixture.Records)
+	for _, c := range verdict.Checks {
+		if c.Name == "execution_serialization" && !c.Passed {
+			t.Errorf("F01 executes each cohort once; the check should pass trivially, got: %v", c.Defects)
+		}
+	}
+}

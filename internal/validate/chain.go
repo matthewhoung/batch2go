@@ -46,6 +46,18 @@ const (
 	// Intervals the path really spends time in, but which the cycle model does
 	// not name. They are measured and reported — as the residual, never folded
 	// into a neighbouring stage.
+	//
+	// StageBarrierWait is deliberately NOT called W_form. W_form is the cycle
+	// model's formation term and it is a property of the proxy: it is the time a
+	// cohort spends being assembled where aggregation happens. At A=off nothing
+	// assembles anything — the load generator releases B requests through the
+	// barrier and each goes straight out — so the interval between the scheduled
+	// release and the barrier's release is the generator's own wait, and it is the
+	// record of the release jitter M1 §6 requires measured against timer
+	// granularity. Naming both quantities W_form would put two physically
+	// unrelated numbers in one archive column, keyed by a cell label nothing
+	// checks.
+	StageBarrierWait   = "barrier_wait"
 	StageReleaseToSend = "release_to_send"
 	StageAdapterUnpack = "adapter_unpack"
 	StageResponsePack  = "response_pack"
@@ -84,7 +96,7 @@ func Chain(cell identity.Cell) ([]Span, error) {
 		// The direct path has one transport hop in each direction, so its transfer
 		// terms are not hop-indexed.
 		return []Span{
-			{StageWForm, events.StageSched, events.StageCohortSeal, true},
+			{StageBarrierWait, events.StageSched, events.StageCohortSeal, false},
 			{StageReleaseToSend, events.StageCohortSeal, events.StageClientSend, false},
 			{StageXReq, events.StageClientSend, events.StageQueueStart, true},
 			{StageQBackend, events.StageQueueStart, events.StageComputeStart, true},
@@ -96,7 +108,7 @@ func Chain(cell identity.Cell) ([]Span, error) {
 		// A=off: the load generator seals at barrier release, so the seal sits
 		// between t_sched and the client send, and the proxy emits none.
 		return append([]Span{
-			{StageWForm, events.StageSched, events.StageCohortSeal, true},
+			{StageBarrierWait, events.StageSched, events.StageCohortSeal, false},
 			{StageReleaseToSend, events.StageCohortSeal, events.StageClientSend, false},
 			{StageXReqHop1, events.StageClientSend, events.StageProxyRecv, true},
 			{StageAPack, events.StageProxyRecv, events.StageProxySend, true},
@@ -138,12 +150,12 @@ func sharedPathTail() []Span {
 // client send to client completion, i.e. t15 − t2 (M2-PLAN §4.3).
 //
 // Stages before the client send are outside it, and that is not an omission. At
-// A=off, W_form and the load generator's dispatch latency happen before the
-// request enters the system at all — they are scheduling facts about the
-// generator, controlled to ≈0 by the release barrier and reported separately. At
-// A=on, W_form moves to the proxy, lands between t_proxy_recv and t_cohort_seal,
-// and is inside the span — which is exactly when it becomes a real cycle stage
-// rather than a property of the harness.
+// A=off, the barrier wait and the load generator's dispatch latency happen before
+// the request enters the system at all — they are scheduling facts about the
+// generator, reported separately and never summed into the cycle. At A=on, W_form
+// appears at the proxy between t_proxy_recv and t_cohort_seal and is inside the
+// span — which is exactly when formation becomes a real cycle stage rather than a
+// property of the harness. There is no cell in which both exist.
 func ConservedSpan() (start, end events.Stage) {
 	return events.StageClientSend, events.StageClientRecv
 }

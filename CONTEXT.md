@@ -27,11 +27,11 @@ _Avoid_: "batching" unqualified
 The unit of work as the client sees it: one input, one result, one (cohort_id, ordinal) identity minted by the load generator.
 
 **Cohort**:
-The set of B logical requests released together by the load generator. At A=OFF a cohort is an accounting label joined offline, never a runtime object.
+The set of B logical requests released together by the load generator. At A=OFF a cohort is an accounting label joined offline, never a runtime object. At A=ON it is additionally a runtime object, held by the proxy until its members are complete and it can be sealed into one envelope.
 _Avoid_: batch, group
 
 **Release barrier**:
-The load generator's simultaneous release of a cohort's B requests — the only runtime synchronization point in identification cells.
+The load generator's simultaneous release of a cohort's B requests — the only synchronization point at the load generator, and the only one anywhere in A=OFF cells. At A=ON the proxy also synchronizes, by construction: envelope aggregation cannot begin until a cohort's members are all present, and the adapter's response side rejoins them because one envelope carries them all. The adapter never joins or synchronizes under A=OFF.
 _Avoid_: cohort barrier, adapter barrier, A=OFF barrier
 
 **Envelope**:
@@ -41,7 +41,7 @@ One transport-level message between proxy and adapter, carrying one logical requ
 The proxy packing a full cohort into one envelope — the A=ON treatment. Happens only at the proxy.
 
 **Formation (W_form)**:
-Waiting time to assemble a cohort at the proxy under open-loop arrivals (Stage C only). Controlled ≈0 in identification cells by the release barrier.
+Waiting time to assemble a cohort at the proxy. It exists wherever the proxy aggregates — that is, in every A=ON cell — and is measured, not assumed absent. In identification cells the release barrier controls it to ≈0; under Stage C's open-loop arrivals it becomes a modeled term rather than a controlled constant.
 
 **Executor**:
 The adapter component that turns released work into Triton requests: IndividualExecutor (→ unbatched entry), DynamicBatchExecutor (→ dynamic entry), PreformedBatchExecutor (→ explicit entry). Executors return execution evidence, never conclusions.
