@@ -185,12 +185,26 @@ func ChainStages(spans []Span) []events.Stage {
 }
 
 // AdditiveConservation reports whether a cell's per-request stage durations may
-// be summed at cohort level. Single-submission cells admit the additive
-// identity; multi-RPC cells do not, because the members' stages legitimately
-// overlap and summing them would double-count (M1 §4, M2-PLAN §4.3).
+// be summed at cohort level.
+//
+// The discriminator is how many serial paths a cohort's work takes, not how many
+// transport envelopes carry it. F10 sends one envelope and produces B concurrent
+// executions that serialize on the single model instance — one envelope, B paths
+// — so summing its members' stages would count the same wall-clock interval once
+// per member. It is therefore interval-accounted alongside D0, F00 and F01
+// (ADR-0009).
+//
+// F11-P is additive: one request, one execution, one path.
+//
+// F11-D carries the additive classification ADR-0009 assigned it, and nothing
+// exercises that yet — the cell does not run, and no fixture produces its
+// evidence. Spec 0003 must re-derive it against the same discriminator before it
+// does, because at M=1 a cohort's B concurrent submissions resolve into a single
+// execution, and a naive per-member sum would count that one execution B times.
+// The classification is recorded here rather than assumed correct.
 func AdditiveConservation(cell identity.Cell) bool {
 	switch cell {
-	case identity.CellF10, identity.CellF11P, identity.CellF11D:
+	case identity.CellF11P, identity.CellF11D:
 		return true
 	default:
 		return false

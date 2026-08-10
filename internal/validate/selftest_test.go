@@ -387,3 +387,27 @@ func TestPreSendQuantitiesAreNeverAccounted(t *testing.T) {
 		}
 	}
 }
+
+// The conservation class each cell carries, pinned against ADR-0009 so that the
+// decision record and the code cannot drift apart again — they already did once,
+// with the ADR committed while the function still called F10 additive.
+func TestConservationClassMatchesTheDecisionRecord(t *testing.T) {
+	for cell, additive := range map[identity.Cell]bool{
+		identity.CellD0:     false,
+		identity.CellF00:    false,
+		identity.CellF01:    false,
+		identity.CellF00Seq: false,
+		// One envelope, but B concurrent executions serializing on one instance:
+		// B paths, so the members' stages overlap and are never summed (ADR-0009).
+		identity.CellF10: false,
+		// One request, one execution, one path.
+		identity.CellF11P: true,
+		// Classified additive by ADR-0009; spec 0003 must re-derive it before the
+		// cell runs.
+		identity.CellF11D: true,
+	} {
+		if got := validate.AdditiveConservation(cell); got != additive {
+			t.Errorf("%s: additive = %v, ADR-0009 says %v", cell, got, additive)
+		}
+	}
+}
