@@ -82,6 +82,7 @@ func (e *Executor) Execute(ctx context.Context, d executor.Dispatch) (executor.R
 		Dispatched:        len(d.Members),
 		DispatchSkewNanos: dispatchSkew(results),
 		CPUNanos:          processCPUNanos() - cpuStart,
+		CPUScope:          executor.CPUScopeProcess,
 	}
 	return executor.Result{Members: results}, evidence, nil
 }
@@ -105,9 +106,14 @@ func dispatchSkew(results []executor.MemberResult) int64 {
 	return last - first
 }
 
-// processCPUNanos reads the process's consumed CPU time. It is the adapter's own
-// cost for a dispatch, which the design requires recorded rather than assumed
-// negligible.
+// processCPUNanos reads the process's consumed CPU time.
+//
+// RUSAGE_SELF counts the whole process, so what this bounds is "CPU the adapter
+// burned while this dispatch was outstanding", not "CPU this dispatch cost".
+// With concurrent dispatches the windows overlap and the same work is counted
+// once per dispatch. The value is therefore reported under CPUScopeProcess and
+// is comparable only within one Factor A level; see that constant for why a
+// per-dispatch measurement is not available yet.
 func processCPUNanos() int64 {
 	var usage syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {

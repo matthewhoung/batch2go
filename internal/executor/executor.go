@@ -61,6 +61,41 @@ func (r Result) Failed() error {
 	return nil
 }
 
+// CPUScope names what a CPU measurement actually counted. It travels with the
+// value because the two are not separable: a number whose definition changed
+// between conditions is not a measurement of those conditions.
+type CPUScope string
+
+const (
+	// CPUScopeProcess is whole-process CPU sampled around a dispatch, via
+	// getrusage(RUSAGE_SELF).
+	//
+	// It is NOT comparable across Factor A levels, and that is a property of the
+	// measurement rather than of the treatment. At A=off a cohort's B dispatches
+	// run concurrently and each attributes the entire process's CPU over its own
+	// overlapping window, so the same work is counted B times; at A=on one
+	// dispatch attributes it once. Differencing the two would produce a number
+	// that moves with B for reasons that have nothing to do with envelope
+	// aggregation — exactly the treatment-correlated artifact this project
+	// measures GC and tracing overhead in order to bound.
+	//
+	// So it is recorded as a diagnostic, and the validator must not admit it into
+	// a cross-level contrast while it carries this scope.
+	CPUScopeProcess CPUScope = "process"
+
+	// CPUScopeDispatch is reserved for a measurement that counts only the work of
+	// one dispatch and is therefore comparable across A levels. Nothing produces
+	// it yet: Go's scheduler migrates goroutines across threads, so
+	// RUSAGE_THREAD does not bound a dispatch either. When something does, it
+	// coexists with the process scope in the archive rather than replacing it,
+	// and a reader can tell which definition produced each number.
+	CPUScopeDispatch CPUScope = "dispatch"
+)
+
+// ComparableAcrossFactorA reports whether a scope may enter a contrast between
+// A=on and A=off.
+func (s CPUScope) ComparableAcrossFactorA() bool { return s == CPUScopeDispatch }
+
 // Evidence is what the executor observed about its own dispatch.
 type Evidence struct {
 	Dispatched int
@@ -70,9 +105,12 @@ type Evidence struct {
 	// omitted, so "no skew" and "not measured" stay distinguishable.
 	DispatchSkewNanos int64
 
-	// CPUNanos is the adapter's own cost for the dispatch. It is mandatory
-	// evidence for the fan-out cells (M1 Rev 4 decision 1).
+	// CPUNanos is the adapter's cost for the dispatch, and CPUScope says what that
+	// number counted. It is mandatory evidence for the fan-out cells (M1 Rev 4
+	// decision 1), but only within one Factor A level while the scope is
+	// process-wide.
 	CPUNanos int64
+	CPUScope CPUScope
 }
 
 // Executor turns a dispatch into results and evidence.

@@ -449,9 +449,16 @@ type AdapterEvidence struct {
 	// meaningful only when the adapter released more than one member at once, and
 	// is recorded as zero otherwise rather than omitted.
 	DispatchSkewNanos int64 `protobuf:"varint,2,opt,name=dispatch_skew_nanos,json=dispatchSkewNanos,proto3" json:"dispatch_skew_nanos,omitempty"`
-	CpuNanos          int64 `protobuf:"varint,3,opt,name=cpu_nanos,json=cpuNanos,proto3" json:"cpu_nanos,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// cpu_nanos is the adapter's cost for this dispatch and cpu_scope says what
+	// that number counted. The scope travels with the value because a quantity
+	// whose definition changes between experimental conditions is not a
+	// measurement of those conditions: the process scope counts the same work once
+	// per concurrent dispatch, so it is comparable within a Factor A level and not
+	// across one.
+	CpuNanos      int64  `protobuf:"varint,3,opt,name=cpu_nanos,json=cpuNanos,proto3" json:"cpu_nanos,omitempty"`
+	CpuScope      string `protobuf:"bytes,4,opt,name=cpu_scope,json=cpuScope,proto3" json:"cpu_scope,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AdapterEvidence) Reset() {
@@ -503,6 +510,13 @@ func (x *AdapterEvidence) GetCpuNanos() int64 {
 		return x.CpuNanos
 	}
 	return 0
+}
+
+func (x *AdapterEvidence) GetCpuScope() string {
+	if x != nil {
+		return x.CpuScope
+	}
+	return ""
 }
 
 // ResponseEnvelope carries the same identity back, with per-member results.
@@ -830,13 +844,14 @@ const file_api_envelope_v1_envelope_proto_rawDesc = "" +
 	"\x0fmembership_uids\x18\x05 \x03(\x03B\x02\x10\x01R\x0emembershipUids\x12\x1d\n" +
 	"\n" +
 	"batch_size\x18\x06 \x01(\rR\tbatchSize\x12$\n" +
-	"\x0edata_out_bytes\x18\a \x01(\x04R\fdataOutBytes\"~\n" +
+	"\x0edata_out_bytes\x18\a \x01(\x04R\fdataOutBytes\"\x9b\x01\n" +
 	"\x0fAdapterEvidence\x12\x1e\n" +
 	"\n" +
 	"dispatched\x18\x01 \x01(\rR\n" +
 	"dispatched\x12.\n" +
 	"\x13dispatch_skew_nanos\x18\x02 \x01(\x03R\x11dispatchSkewNanos\x12\x1b\n" +
-	"\tcpu_nanos\x18\x03 \x01(\x03R\bcpuNanos\"\xdc\x02\n" +
+	"\tcpu_nanos\x18\x03 \x01(\x03R\bcpuNanos\x12\x1b\n" +
+	"\tcpu_scope\x18\x04 \x01(\tR\bcpuScope\"\xdc\x02\n" +
 	"\x10ResponseEnvelope\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1b\n" +

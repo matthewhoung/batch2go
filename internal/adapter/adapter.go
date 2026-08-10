@@ -83,6 +83,7 @@ func (s *Service) Execute(ctx context.Context, env *envelopev1.RequestEnvelope) 
 			Dispatched:        uint32(evidence.Dispatched),
 			DispatchSkewNanos: evidence.DispatchSkewNanos,
 			CpuNanos:          evidence.CPUNanos,
+			CpuScope:          string(evidence.CPUScope),
 		},
 		Results: make([]*envelopev1.LogicalResult, 0, len(result.Members)),
 	}
