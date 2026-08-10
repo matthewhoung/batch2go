@@ -316,3 +316,47 @@ func TestSerializationCheckSkipsVectorizedCells(t *testing.T) {
 		}
 	}
 }
+
+// Joining a request's records must not depend on the order they are read in.
+//
+// A request can carry two different non-OK statuses — the load generator
+// recording a timeout while the adapter records an error for the same member.
+// Under last-one-wins the archive's answer was decided by record order across
+// emitters, which is a property of the file, not of the run.
+func TestStatusResolutionIsDeterministicRegardlessOfRecordOrder(t *testing.T) {
+	base := testkit.NewSpec(identity.CellF00).MustBuild()
+	req := base.FirstRequest()
+
+	forward := base.Clone()
+	for i, d := range forward.Records {
+		if d.Record.Request() != req {
+			continue
+		}
+		rec := d.Record
+		switch rec.Emitter {
+		case identity.EmitterLoadGen:
+			rec.Status = events.StatusTimeout
+		case identity.EmitterAdapter:
+			rec.Status = events.StatusError
+		}
+		forward.Records[i].Record = rec
+	}
+
+	reversed := forward.Clone()
+	for i, j := 0, len(reversed.Records)-1; i < j; i, j = i+1, j-1 {
+		reversed.Records[i], reversed.Records[j] = reversed.Records[j], reversed.Records[i]
+	}
+
+	a := validate.Join(forward.Records)[req]
+	b := validate.Join(reversed.Records)[req]
+	if a.Status != b.Status {
+		t.Fatalf("status depends on record order: %v forward, %v reversed", a.Status, b.Status)
+	}
+	if a.Status != events.StatusTimeout {
+		t.Errorf("status = %v, want timeout — it is the more specific diagnosis and must survive the join", a.Status)
+	}
+	// And both observations are kept, because the disagreement is itself evidence.
+	if len(a.StatusBySource) < 2 {
+		t.Errorf("only %d source statuses kept; each process's view must survive", len(a.StatusBySource))
+	}
+}

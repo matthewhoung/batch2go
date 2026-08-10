@@ -166,8 +166,13 @@ type Joined struct {
 	// same uid set independently, and a fan-out that mapped a set to the wrong
 	// member would agree with itself but not with the other source.
 	MembershipBySource map[identity.Emitter][]identity.UID
-	BatchSize          uint32
-	SchemaVersions     map[uint32]bool
+
+	// StatusBySource keeps each process's view of the outcome. Status is resolved
+	// deterministically below, but the raw observations survive: two processes
+	// disagreeing about how a request ended is itself evidence.
+	StatusBySource map[identity.Emitter]events.Status
+	BatchSize      uint32
+	SchemaVersions map[uint32]bool
 }
 
 // Stage returns a joined timestamp and whether it is present.
@@ -191,6 +196,7 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 				Emitters:           map[identity.Emitter]int{},
 				SchemaVersions:     map[uint32]bool{},
 				MembershipBySource: map[identity.Emitter][]identity.UID{},
+				StatusBySource:     map[identity.Emitter]events.Status{},
 			}
 			out[req] = j
 		}
@@ -206,9 +212,14 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 			}
 		}
 		if d.Record.Status != events.StatusUnspecified {
-			// A non-OK status anywhere is the request's status: a member that
-			// failed on one hop did not succeed because another hop was fine.
-			if j.Status == events.StatusUnspecified || d.Record.Status != events.StatusOK {
+			j.StatusBySource[d.Record.Emitter] = d.Record.Status
+			// Resolution is by rank, not by arrival. A request can carry two
+			// different non-OK statuses — the load generator recording a timeout
+			// while the adapter records an error for the same member — and
+			// last-one-wins would let the order records happened to be read in
+			// decide which reached the archive. Rank keeps the more specific
+			// diagnosis: a timeout says how it failed, an error only that it did.
+			if statusRank(d.Record.Status) > statusRank(j.Status) {
 				j.Status = d.Record.Status
 			}
 		}
@@ -223,6 +234,21 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 		}
 	}
 	return out
+}
+
+// statusRank orders outcomes from least to most diagnostic, so that joining a
+// request's records is deterministic regardless of the order they are read in.
+func statusRank(s events.Status) int {
+	switch s {
+	case events.StatusTimeout:
+		return 3
+	case events.StatusError:
+		return 2
+	case events.StatusOK:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // Validate is the whole judgment. It is a pure function: same bundle, same
