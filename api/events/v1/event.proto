@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+// Package batch2go.events.v1 is the scientific event record schema: the primary
+// evidence of every run. Observability metrics never testify (ARCHITECTURE §8.1).
+//
+// Wire compatibility is load-bearing. The hot path writes these messages with a
+// hand-rolled, allocation-free encoder (internal/events/codec.go); the generated
+// code here is the independent implementation that encoder is tested against.
+package batch2go.events.v1;
+
+option go_package = "github.com/matthewhoung/batch2go/api/events/v1;eventsv1";
+
+// Emitter names the process that owns a timestamp. Ownership is evidence:
+// t_cohort_seal belongs to the proxy at A=on and to the load generator at
+// A=off, and the record says which (ADR-0001).
+enum Emitter {
+  EMITTER_UNSPECIFIED = 0;
+  EMITTER_LOADGEN = 1;
+  EMITTER_PROXY = 2;
+  EMITTER_ADAPTER = 3;
+  EMITTER_TRITON = 4;
+}
+
+// Status is the terminal outcome of a logical request. A timed-out member never
+// disappears from the record (M2-PLAN §3, response integrity).
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_OK = 1;
+  STATUS_ERROR = 2;
+  STATUS_TIMEOUT = 3;
+}
+
+// EventRecord is one process's contribution to the path of one logical request.
+//
+// Records are written append-only per process and joined offline by the
+// validator on (run_id, cohort_id, ordinal) — a cohort at A=off is an accounting
+// label, never a runtime object (ADR-0001). Each of the 15 timestamps is
+// optional: absence is typed by presence_mask, never encoded as zero (ADR-0005).
+message EventRecord {
+  // ---- schema and run identity ----
+  uint32 schema_version = 1;
+  string experiment_id = 2;
+  string session_id = 3;
+  string run_id = 4;
+  string cell = 5;
+
+  // clock_domain_id identifies the verified monotonic clock domain these
+  // timestamps live in. Subtracting across domains is a validator error.
+  string clock_domain_id = 6;
+
+  Emitter emitter = 7;
+  uint32 writer_id = 8;
+  uint64 seq = 9;
+
+  // ---- logical request identity ----
+  uint32 cohort_id = 10;
+  uint32 ordinal = 11;
+  uint64 envelope_id = 12;
+  uint64 execution_id = 13;
+  string triton_request_id = 14;
+
+  // presence_mask has bit (i-1) set when timestamp i below is carried by this
+  // record. The validator compares the join of all masks for a request against
+  // the mask its cell topology requires.
+  uint32 presence_mask = 15;
+  Status status = 16;
+
+  // ---- the 15 timestamps, monotonic nanoseconds, direct clock reads ----
+  optional int64 t_sched = 20;             //  1 LoadGen  scheduled release
+  optional int64 t_client_send = 21;       //  2 LoadGen  client send
+  optional int64 t_proxy_recv = 22;        //  3 Proxy    X_req hop 1 end
+  optional int64 t_cohort_seal = 23;       //  4 LoadGen(A=off)/Proxy(A=on)
+  optional int64 t_proxy_send = 24;        //  5 Proxy    A_pack end
+  optional int64 t_adapter_recv = 25;      //  6 Adapter  X_req hop 2 end
+  optional int64 t_adapter_dispatch = 26;  //  7 Adapter  unpack end
+  optional int64 t_queue_start = 27;       //  8 Triton   Q_backend start
+  optional int64 t_compute_start = 28;     //  9 Triton   S_comp start
+  optional int64 t_compute_end = 29;       // 10 Triton   S_comp end
+  optional int64 t_adapter_result = 30;    // 11 Adapter  backend return
+  optional int64 t_adapter_send = 31;      // 12 Adapter  response pack end
+  optional int64 t_proxy_resp_recv = 32;   // 13 Proxy    X_resp end
+  optional int64 t_proxy_fanout = 33;      // 14 Proxy    F_fanout end
+  optional int64 t_client_recv = 34;       // 15 LoadGen  client completion
+
+  // ---- byte accounting and execution evidence ----
+  uint32 logical_bytes = 40;
+  uint32 envelope_bytes = 41;
+
+  // batch_size is b_kj: the shape of the execution this request belonged to, as
+  // reported by the backend. Declared V is never inferred from it.
+  uint32 batch_size = 42;
+
+  // membership_uids is the self-attesting evidence of ADR-0007: the complete uid
+  // set the model returned for this request's execution. Own-uid-only echo is a
+  // failure, not a pass.
+  repeated int64 membership_uids = 43 [packed = true];
+
+  // membership_count is the size the responding execution claimed. It exceeds
+  // len(membership_uids) only when the record hit its fixed capacity, which the
+  // validator reports as truncated evidence rather than accepting silently.
+  uint32 membership_count = 44;
+}
