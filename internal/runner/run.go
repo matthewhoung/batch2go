@@ -520,9 +520,10 @@ func releaseCohort(
 			rec.LogicalBytes = uint32(client.LogicalBytes())
 			rec.SetStage(events.StageSched, cohort.ScheduledAt)
 
-			// The barrier is the only runtime synchronization point. Every member
-			// leaves at the same instant, and that instant is the cohort seal —
-			// owned here because at A=off the load generator owns it (ADR-0001).
+			// The barrier is the load generator's synchronization point, and at A=off
+			// the only one anywhere. Every member leaves at the same instant, and at
+			// A=off that instant is the cohort seal, owned here (ADR-0001). At A=on
+			// the proxy owns the seal and this stage is not written here.
 			seal := barrier.Arrive()
 			rec.SetStage(events.StageCohortSeal, seal)
 

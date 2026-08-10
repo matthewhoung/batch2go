@@ -143,9 +143,10 @@ func (Status) EnumDescriptor() ([]byte, []int) {
 // EventRecord is one process's contribution to the path of one logical request.
 //
 // Records are written append-only per process and joined offline by the
-// validator on (run_id, cohort_id, ordinal) — a cohort at A=off is an accounting
-// label, never a runtime object (ADR-0001). Each of the 15 timestamps is
-// optional: absence is typed by presence_mask, never encoded as zero (ADR-0005).
+// validator on (run_id, cohort_id, ordinal) — at A=off a cohort is an accounting
+// label and never a runtime object, while at A=on the proxy holds one to build
+// the envelope (ADR-0001). Each of the 15 timestamps is optional: absence is
+// typed by presence_mask, never encoded as zero (ADR-0005).
 type EventRecord struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// ---- schema and run identity ----

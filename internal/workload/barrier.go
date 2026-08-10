@@ -1,6 +1,7 @@
 // Package workload owns the load generator's scheduling and the release
-// barrier — the only runtime synchronization point in identification cells
-// (ADR-0001).
+// barrier — the only synchronization point at the load generator, and the only
+// one anywhere in A=OFF cells (ADR-0001). At A=ON the proxy synchronizes too,
+// because it cannot aggregate a cohort it has not finished receiving.
 //
 // What this package deliberately does not do: it never decides envelope
 // aggregation or compute semantics, and it never joins a cohort after release. A
@@ -19,9 +20,9 @@ import (
 // Barrier releases a cohort's B logical requests simultaneously.
 //
 // Every member arrives and blocks; when the last one arrives the barrier takes
-// one timestamp — the cohort seal — and releases all of them at once. That
-// single timestamp is t_cohort_seal, owned here because at A=off the load
-// generator owns it; at A=on the proxy owns it instead, at envelope seal
+// one timestamp and releases all of them at once. At A=off that timestamp is
+// t_cohort_seal, owned here; at A=on the proxy owns the seal instead, at
+// envelope seal, and this instant is the load generator's barrier release
 // (ADR-0001).
 type Barrier struct {
 	size int
