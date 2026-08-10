@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "description": "Spec 0001 walking skeleton: D0 diagnostic on the local validation environment. The direct path, no proxy. Timing here is a correctness check, never a performance claim.",
+
+  "experiment_id": "exp-0001-walking-skeleton",
+  "session_id": "sess-envv-0001",
+  "run_id": "run-d0-envv-b4",
+  "cell": "D0",
+  "environment": "envV",
+
+  "cohort": {
+    "size": 4,
+    "count": 25,
+    "warmup_count": 3
+  },
+
+  "model": {
+    "catalog": "artifacts/catalog.json",
+    "artifact_dir": "artifacts/generated",
+    "runtime_dir": "results/runtime-models",
+    "artifact_id": "synthetic_k8_p65536",
+    "entry": "unbatched",
+    "expected_digest": "sha256:87a859763e0236fc0c677e5e311b3661b947aabb36db301674df696b8ded12dd"
+  },
+
+  "workload": {
+    "seed": 20260810,
+    "release_mode": "fixed-cohort",
+    "inter_cohort_gap_millis": 20,
+    "request_timeout_millis": 30000
+  },
+
+  "transport": {
+    "triton_endpoint": "127.0.0.1:8001",
+    "max_message_bytes": 268435456,
+    "initial_window_size": 4194304,
+    "initial_conn_window_size": 16777216
+  },
+
+  "gc": {
+    "gogc": 100,
+    "gomemlimit_bytes": 2147483648,
+    "sample_millis": 20
+  },
+
+  "tracing": {
+    "mode": "timestamps",
+    "trace_dir": "results/triton-traces"
+  },
+
+  "output": {
+    "bundle_dir": "results/bundles"
+  },
+
+  "expected_evidence": {
+    "executions": 100,
+    "executions_per_cohort": 4,
+    "batch_size": 1
+  },
+
+  "conservation": {
+    "tolerance_fraction": 0.05
+  }
+}
