@@ -80,10 +80,24 @@ Docs-first, decisions on the record:
 
 **There are no performance numbers in this repository yet, by design.** None will appear until the preregistered confirmatory runs complete — an instrument that reports results before it is validated is exactly the failure mode this project exists to avoid.
 
+## Running it
+
+Requires Docker with GPU access, Go, and [uv](https://docs.astral.sh/uv/). Everything is a local `make` target — there is no CI anywhere in this repository.
+
+```bash
+make stack-up    # generate the synthetic models, verify digests, start Triton (pinned by digest)
+make contracts   # the acceptance suite: both seams, D0 and F00 at B=4, both bundles validated
+make stack-down
+```
+
+`make contracts` runs the offline seam first (the validator's conservation self-test against injected known delays, plus the defect fixtures it must reject), then the live seam: each manifest end to end against real Triton, producing a run bundle that the validator judges from the archive alone. `make validate BUNDLE=results/bundles/<run>` re-judges an archived bundle with no network and no live state, which is the property that makes a verdict reproducible by anyone holding it.
+
+Other targets: `make test` (unit tests beneath the seams), `make test-models` (the ONNX attestation contract, including the naive-echo counter-fixture), `make bench-events` (the hot-path record writer, which must report zero allocations), `make smoke` (one request through the gateway, printing the verified uid attestation).
+
 ## Status
 
-- [x] Public design record: glossary, ADR-0001…0007, spec 0001
-- [ ] Spec 0001 — walking skeleton: D0 + F00 end to end *(in progress)*
+- [x] Public design record: glossary, ADR-0001…0008, spec 0001
+- [x] Spec 0001 — walking skeleton: D0 + F00 end to end
 - [ ] Spec 0002 — envelope aggregation (F10)
 - [ ] Spec 0003 — scheduler-formed batching (F01, F11-D) + exact-B conformance
 - [ ] Spec 0004 — full contract matrix, all seven cells
@@ -100,7 +114,7 @@ Go (data & control planes) · gRPC / Protobuf · NVIDIA Triton Inference Server 
 ## Author
 
 Research and engineering by [@matthewhoung](https://github.com/matthewhoung) · matthewhoung@gmail.com
-Built as the measurement platform for a graduate research project in ML-serving performance evaluation, prepared for peer-reviewed submission.
+Built as the measurement platform in ML-serving performance evaluation, prepared for peer-reviewed submission.
 
 ## License
 
