@@ -1,12 +1,10 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
 # Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+/bin/
 
 # Test binary, built with `go test -c`
 *.test
@@ -16,9 +14,6 @@
 coverage.*
 *.coverprofile
 profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
 
 # Go workspace file
 go.work
@@ -34,3 +29,22 @@ go.work.sum
 .thesis/
 .reference/
 .planning/
+
+# Local working tickets (mattpocock to-tickets, not tracked)
+.scratch/
+
+# Generated run outputs: run bundles, the runtime Triton model repository, and
+# Triton's raw trace files. Bundles are mirrored from S3 for analysis; they are
+# never source and never committed (CODEBASE.md §13).
+/results/
+
+# Model binaries. The artifact catalog (artifacts/catalog.json) is provenance and
+# is committed; the .onnx artifacts it describes are not — they are regenerated
+# from tools/modelgen and verified by digest (CODEBASE.md §11).
+/artifacts/generated/
+
+# Python tooling. uv.lock is committed: pinned dependency versions are part of
+# reproducibility, not local state.
+__pycache__/
+.venv/
+.pytest_cache/
