@@ -17,15 +17,29 @@ import (
 	"github.com/matthewhoung/batch2go/internal/triton"
 )
 
+// Backend is the submission engine this executor drives.
+//
+// The interface is declared here, at the point of use, so that the fan-out can be
+// exercised without a live inference server. That matters more than it sounds:
+// concurrency, result-to-member mapping and dispatch skew are the whole of this
+// executor's contribution, and until they could be tested offline the only way to
+// observe them was to run the real stack and read the timestamps afterwards.
+//
+// *triton.Submitter satisfies it; nothing else does in a real run.
+type Backend interface {
+	Submit(ctx context.Context, model string, members []identity.LogicalRequest) (triton.Result, error)
+	LogicalBytes() int
+}
+
 // Executor submits each member as its own single-item request to the unbatched
 // entry.
 type Executor struct {
-	submitter *triton.Submitter
+	submitter Backend
 	now       executor.Clock
 }
 
 // New builds the individual executor over a shared submission engine.
-func New(submitter *triton.Submitter, now executor.Clock) (*Executor, error) {
+func New(submitter Backend, now executor.Clock) (*Executor, error) {
 	if submitter == nil {
 		return nil, fmt.Errorf("executor/individual: needs a submission engine")
 	}

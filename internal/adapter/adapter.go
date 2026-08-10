@@ -89,9 +89,10 @@ func (s *Service) Execute(ctx context.Context, env *envelopev1.RequestEnvelope) 
 	}
 
 	envelopeBytes := uint32(envelope.WireBytes(env))
-	for i, m := range result.Members {
+	payloads := payloadBytesByMember(env)
+	for _, m := range result.Members {
 		resp.Results = append(resp.Results, logicalResult(m))
-		s.record(env, m, recvAt, sendAt, envelopeBytes, payloadBytes(env, i))
+		s.record(env, m, recvAt, sendAt, envelopeBytes, payloads[m.Member])
 	}
 	return resp, nil
 }
@@ -150,10 +151,20 @@ func logicalResult(m executor.MemberResult) *envelopev1.LogicalResult {
 	return out
 }
 
-func payloadBytes(env *envelopev1.RequestEnvelope, i int) uint32 {
-	reqs := env.GetRequests()
-	if i < 0 || i >= len(reqs) {
-		return 0
+// payloadBytesByMember keys the envelope's payload sizes by identity.
+//
+// Indexing by position would couple the executor's result order to the
+// envelope's member order across a package boundary: at A=off there is one
+// member and the coupling is invisible, and at A=on a reordered result would
+// attribute one member's payload size to another. Identity is what links them.
+func payloadBytesByMember(env *envelopev1.RequestEnvelope) map[identity.LogicalRequest]uint32 {
+	out := make(map[identity.LogicalRequest]uint32, len(env.GetRequests()))
+	for _, r := range env.GetRequests() {
+		member := identity.LogicalRequest{
+			Cohort:  identity.CohortID(r.GetCohortId()),
+			Ordinal: identity.Ordinal(r.GetOrdinal()),
+		}
+		out[member] = uint32(len(r.GetPayload()))
 	}
-	return uint32(len(reqs[i].GetPayload()))
+	return out
 }
