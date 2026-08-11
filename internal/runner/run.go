@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/matthewhoung/batch2go/internal/adapter"
 	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/events/clockdomain"
 	eventsparquet "github.com/matthewhoung/batch2go/internal/events/parquet"
@@ -482,6 +483,13 @@ func execute(
 			}
 			bundle.Streams = append(bundle.Streams, rec)
 		}
+		// And the adapter's account of how it was configured, which only that
+		// process knows and which no amount of reading this one's flags recovers.
+		adapterRecord, err := adapter.ReadProcessRecord(layout.StreamPath(identity.EmitterAdapter))
+		if err != nil {
+			return err
+		}
+		bundle.Adapter = &adapterRecord
 	}
 	bundle.Files.Manifest = "manifest.json"
 	for _, stream := range bundle.Streams {
@@ -613,10 +621,19 @@ func releaseCohort(
 // recordBackendTimestamps writes the Triton-side event records, joined to
 // logical requests by the request id the client set.
 //
-// Completeness is asserted rather than hoped for: every recorded request must
-// have a trace carrying all three backend timestamps. A missing one is a missing
-// timestamp — a validation failure — and the run must say so now rather than
-// leave a hole for the analysis to trip over.
+// Completeness is asserted rather than hoped for: every request that reached the
+// backend must have a trace carrying all three backend timestamps. A missing one
+// is a missing timestamp — a validation failure — and the run must say so now
+// rather than leave a hole for the analysis to trip over.
+//
+// A request that never reached the backend is a different matter. A cohort that
+// failed to form was refused at the proxy, so no member of it was ever executed
+// and none of them can have a trace; treating that as missing evidence would end
+// the run here, before the bundle is written, and the failure the design says
+// must be "bounded and reported" would leave no archive to report it in
+// (ADR-0010). Those members are passed over, and the validator names the
+// formation failure from the records — which is where a verdict is supposed to
+// come from.
 func recordBackendTimestamps(
 	traces []triton.TraceEvent,
 	results map[identity.LogicalRequest]memberOutcome,
@@ -634,6 +651,13 @@ func recordBackendTimestamps(
 	for req := range results {
 		tr, ok := byRequest[req]
 		if !ok || !tr.Complete() {
+			// A request the client saw fail never reached the backend, so it has no
+			// trace to be missing. Its failure is already recorded — by the load
+			// generator here, and by the proxy in its own stream — and the verdict
+			// judges it from those.
+			if results[req].Status != events.StatusOK {
+				continue
+			}
 			missing = append(missing, req)
 			continue
 		}
