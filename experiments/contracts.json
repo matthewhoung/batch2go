@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "description": "The acceptance suite: the cells this build claims to run, in the order it runs them. Each manifest carries its own expected evidence, so adding a cell is adding its path here and nothing else — gate G1 eventually needs seven cells at two cohort sizes, and the suite has to grow by declaration rather than by machinery.",
+
+  "manifests": [
+    "experiments/manifests/d0-envv-b4.json",
+    "experiments/manifests/f00-envv-b4.json"
+  ]
+}

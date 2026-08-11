@@ -21,6 +21,11 @@ COMPOSE_FILE := deploy/compose.envv.yaml
 TRITON_DIGEST ?= sha256:f76300c73eba7dd4c67183210c10b3fef67fb9aa2c18f150cb916387078442f0
 export TRITON_DIGEST
 
+# The acceptance suite names its own cells. Adding one is adding a manifest to
+# this file, never a target below: which cells are claimed is an experimental
+# statement, and this file invokes rather than decides.
+CONTRACTS ?= experiments/contracts.json
+
 CATALOG      := artifacts/catalog.json
 ARTIFACT_DIR := artifacts/generated
 RESULTS_DIR  := results
@@ -111,32 +116,17 @@ stack-down: ## Tear the stack down
 stack-logs: ## Follow Triton's logs
 	$(COMPOSE) -f $(COMPOSE_FILE) logs -f
 
-.PHONY: run-d0
-run-d0: build ## Run the D0 diagnostic end to end and validate its bundle
-	$(GO) run ./cmd/runner run --manifest experiments/manifests/d0-envv-b4.json \
-		--image-digest $(TRITON_DIGEST)
-
-.PHONY: run-f00
-run-f00: build ## Run the F00 baseline end to end and validate its bundle
-	$(GO) run ./cmd/runner run --manifest experiments/manifests/f00-envv-b4.json \
-		--image-digest $(TRITON_DIGEST)
+.PHONY: run
+run: build ## Execute one manifest end to end (MANIFEST=experiments/manifests/<cell>.json)
+	$(GO) run ./cmd/runner run --manifest $(MANIFEST) --image-digest $(TRITON_DIGEST)
 
 .PHONY: contracts
-contracts: build ## The walking-skeleton acceptance suite: D0 and F00 at B=4, both bundles green
+contracts: build ## The acceptance suite: both seams, every contract experiments/contracts.json declares
 	@echo "== offline seam: validator self-test and defect fixtures =="
 	$(GO) test ./internal/validate/... ./internal/events/... ./internal/testkit/...
 	@echo
-	@echo "== live seam: D0 =="
-	$(GO) run ./cmd/runner run --manifest experiments/manifests/d0-envv-b4.json \
-		--image-digest $(TRITON_DIGEST)
-	$(GO) run ./cmd/runner validate --bundle $(RESULTS_DIR)/bundles/run-d0-envv-b4
-	@echo
-	@echo "== live seam: F00 =="
-	$(GO) run ./cmd/runner run --manifest experiments/manifests/f00-envv-b4.json \
-		--image-digest $(TRITON_DIGEST)
-	$(GO) run ./cmd/runner validate --bundle $(RESULTS_DIR)/bundles/run-f00-envv-b4
-	@echo
-	@echo "contracts: D0 and F00 validated green at B=4"
+	@echo "== live seam: the declared contracts =="
+	$(GO) run ./cmd/runner contracts --suite $(CONTRACTS) --image-digest $(TRITON_DIGEST)
 
 .PHONY: validate
 validate: ## Judge an archived bundle offline (BUNDLE=results/bundles/<run>)

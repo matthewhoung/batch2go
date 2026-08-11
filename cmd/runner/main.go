@@ -33,6 +33,8 @@ func main() {
 		err = validateBundle(os.Args[2:])
 	case "validate-manifest":
 		err = validateManifest(os.Args[2:])
+	case "contracts":
+		err = contracts(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -55,6 +57,7 @@ subcommands:
   run                execute a manifest and write its run bundle
   validate           judge an archived run bundle offline
   validate-manifest  check a manifest without running it
+  contracts          run every contract a declared acceptance suite names
 `)
 }
 
@@ -71,12 +74,18 @@ func validateBundle(args []string) error {
 	if *bundleDir == "" {
 		return fmt.Errorf("validate needs --bundle")
 	}
+	return judgeBundle(*bundleDir, *verbose)
+}
 
-	bundle, verdict, err := runner.ValidateBundle(*bundleDir)
+// judgeBundle reaches a verdict from an archived bundle and reports it. It
+// touches no network and no live state, which is what makes the verdict
+// reproducible by anyone holding the archive.
+func judgeBundle(bundleDir string, verbose bool) error {
+	bundle, verdict, err := runner.ValidateBundle(bundleDir)
 	if err != nil {
 		return err
 	}
-	if err := runner.WriteVerdict(*bundleDir, verdict); err != nil {
+	if err := runner.WriteVerdict(bundleDir, verdict); err != nil {
 		return err
 	}
 
@@ -105,7 +114,7 @@ func validateBundle(args []string) error {
 
 	if defects := verdict.Defects(); len(defects) > 0 {
 		limit := len(defects)
-		if !*verbose && limit > 10 {
+		if !verbose && limit > 10 {
 			limit = 10
 		}
 		fmt.Printf("  %d defects:\n", len(defects))
@@ -140,22 +149,82 @@ func run(args []string) error {
 		return err
 	}
 
-	opts := runner.Options{ImageDigest: *imageDigest}
-	if !*quiet {
-		opts.Logf = func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "runner: "+format+"\n", args...)
-		}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	_, err = executeManifest(ctx, m, runOptions(*imageDigest, *quiet))
+	return err
+}
+
+// contracts runs every contract the declared acceptance suite names.
+//
+// Each one is executed and then judged from its own archive, because the two
+// are different claims: that the stack can produce the run, and that the run's
+// records support the verdict without the stack being there. The suite stops at
+// the first failure — running on would report verdicts produced by a stack whose
+// earlier condition did not hold.
+func contracts(args []string) error {
+	fs := flag.NewFlagSet("contracts", flag.ExitOnError)
+	suitePath := fs.String("suite", "experiments/contracts.json", "declared acceptance suite")
+	imageDigest := fs.String("image-digest", "", "pinned server container digest, recorded in every bundle")
+	quiet := fs.Bool("quiet", false, "suppress progress output")
+	verbose := fs.Bool("verbose", false, "print every defect")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	suite, err := runner.LoadSuite(*suitePath)
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	declared := suite.Contracts()
+	cells := make([]string, 0, len(declared))
+	for _, m := range declared {
+		cells = append(cells, string(m.Cell))
+	}
+	fmt.Printf("suite %s: %d contracts (%s)\n\n", *suitePath, len(declared), strings.Join(cells, ", "))
+
+	opts := runOptions(*imageDigest, *quiet)
+	for i, m := range declared {
+		fmt.Printf("== contract %d of %d: %s B=%d ==\n", i+1, len(declared), m.Cell, m.Cohort.Size)
+
+		bundle, err := executeManifest(ctx, m, opts)
+		if err != nil {
+			return fmt.Errorf("contract %s: %w", m.Cell, err)
+		}
+		if err := judgeBundle(runner.Dir(m), *verbose); err != nil {
+			return fmt.Errorf("contract %s (%s): %w", m.Cell, bundle.Run, err)
+		}
+		fmt.Printf("\n")
+	}
+
+	fmt.Printf("contracts: %d of %d validated green (%s)\n", len(declared), len(declared), strings.Join(cells, ", "))
+	return nil
+}
+
+// executeManifest runs one manifest and reports what the run produced. A failed
+// run still wrote a bundle, so its line is printed before the error is returned.
+func executeManifest(ctx context.Context, m *manifest.Manifest, opts runner.Options) (*runner.Bundle, error) {
 	bundle, err := runner.Run(ctx, m, opts)
 	if bundle != nil {
 		fmt.Printf("%s %s cell=%s cohorts=%d executions=%d\n",
 			bundle.State, bundle.Run, bundle.Cell, len(bundle.Schedule), bundle.TritonStats.ExecutionCount)
 	}
-	return err
+	return bundle, err
+}
+
+func runOptions(imageDigest string, quiet bool) runner.Options {
+	opts := runner.Options{ImageDigest: imageDigest}
+	if !quiet {
+		opts.Logf = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "runner: "+format+"\n", args...)
+		}
+	}
+	return opts
 }
 
 func validateManifest(args []string) error {
