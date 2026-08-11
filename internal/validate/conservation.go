@@ -75,6 +75,34 @@ type CohortConservation struct {
 	UncoveredNanos  int64             `json:"uncovered_nanos"`
 	UncoveredFrac   float64           `json:"uncovered_fraction"`
 	SumOfSpansNanos int64             `json:"sum_of_member_spans_nanos"`
+
+	// Stages is the cohort's own decomposition, present only where its members
+	// share an envelope. Each named stage appears once, whatever its granularity:
+	// a cost the cohort paid once is counted once, where the per-member sum of an
+	// envelope-granularity stage would report it B times.
+	Stages map[string]int64 `json:"stages,omitempty"`
+
+	AccountedNanos   int64 `json:"accounted_nanos,omitempty"`
+	UnaccountedNanos int64 `json:"unaccounted_nanos,omitempty"`
+
+	// ResidualNanos is the cohort's makespan minus the stages the cycle model
+	// names, signed. Where a cohort shares an envelope this is the residual the
+	// run is gated on, because a member's own residual there is not a measure of
+	// unexplained time — see checkConservation.
+	ResidualNanos    int64   `json:"residual_nanos,omitempty"`
+	ResidualFraction float64 `json:"residual_fraction,omitempty"`
+
+	// FormationWaitNanos is W_form at cohort granularity: the earliest arrival to
+	// the seal. It is the part of formation that lies on the cohort's critical
+	// path, because the cohort's clock has been running since its first member
+	// got there.
+	//
+	// It is NOT an independent observation of the per-member values summarized
+	// elsewhere. It is identically the largest of them — the member that arrived
+	// first is the member that waited longest — so the two agreeing establishes
+	// nothing that either one did not already say, and a reader who took their
+	// agreement for corroboration would be counting one measurement twice.
+	FormationWaitNanos int64 `json:"formation_wait_nanos,omitempty"`
 }
 
 func checkConservation(exp Expectation, joined map[identity.LogicalRequest]*Joined) (ConservationReport, Check) {
@@ -145,7 +173,15 @@ func checkConservation(exp Expectation, joined map[identity.LogicalRequest]*Join
 		if absF(rc.ResidualFraction) > report.MaxAbsResidualFraction {
 			report.MaxAbsResidualFraction = absF(rc.ResidualFraction)
 		}
-		if absF(rc.ResidualFraction) > exp.ToleranceFraction {
+		// Where a cohort shares an envelope, a member's own residual is not a
+		// measure of unexplained time and is reported without being gated. A member
+		// that finished early waits for the rest of its cohort before the one
+		// response comes back, and that wait lands in its response-pack interval —
+		// time the cohort really spent, already accounted at cohort level as
+		// another member's execution. Gating it per member would fail every correct
+		// F10 run by a margin that grows with B. The cohort residual below is what
+		// this cell is judged on (ADR-0009).
+		if gateOnMembers(exp.Cell) && absF(rc.ResidualFraction) > exp.ToleranceFraction {
 			defects = append(defects, Defect{
 				Kind:    DefectConservation,
 				Request: requestPtr(req),
@@ -173,7 +209,149 @@ func checkConservation(exp Expectation, joined map[identity.LogicalRequest]*Join
 
 	detail := fmt.Sprintf("max |residual| %.4f%% of path, tolerance %.2f%% (cohort intervals reported, not gated)",
 		report.MaxAbsResidualFraction*100, exp.ToleranceFraction*100)
+
+	if !gateOnMembers(exp.Cell) {
+		var maxCohortFrac float64
+		decomposeCohorts(exp, joined, spans, report.Cohorts)
+		for i := range report.Cohorts {
+			c := &report.Cohorts[i]
+			if absF(c.ResidualFraction) > maxCohortFrac {
+				maxCohortFrac = absF(c.ResidualFraction)
+			}
+			if absF(c.ResidualFraction) > exp.ToleranceFraction {
+				defects = append(defects, Defect{
+					Kind: DefectConservation,
+					Message: fmt.Sprintf("cohort %d: unaccounted %+dns is %.2f%% of a %dns makespan, tolerance %.2f%%",
+						c.Cohort, c.ResidualNanos, c.ResidualFraction*100, c.MakespanNanos, exp.ToleranceFraction*100),
+				})
+			}
+		}
+		detail = fmt.Sprintf(
+			"max |cohort residual| %.4f%% of makespan, tolerance %.2f%% (per-member residuals reported, not gated: a member's wait for its cohort is another member's execution)",
+			maxCohortFrac*100, exp.ToleranceFraction*100)
+	}
 	return report, fail("conservation", defects, detail)
+}
+
+// gateOnMembers reports whether a cell's conservation identity holds per request.
+//
+// It does wherever a request's own path is the whole story: at A=off each member
+// has its own envelope end to end, so the time between its send and its
+// completion is time spent on its behalf. Where a cohort shares one envelope the
+// identity moves to the cohort, because the members' paths merge at the seal and
+// again at the response — and between those two points a member is waiting for
+// work being done for somebody else (ADR-0009).
+func gateOnMembers(cell identity.Cell) bool { return !cell.AggregatesEnvelopes() }
+
+// decomposeCohorts fills in each cohort's own decomposition, in place.
+//
+// The cohort's chain is the same chain a member walks, evaluated at the instants
+// that lie on the cohort's critical path rather than on any one member's. Those
+// instants tile the makespan exactly, so what is left over is the time the cycle
+// model does not name — and nothing else.
+func decomposeCohorts(
+	exp Expectation,
+	joined map[identity.LogicalRequest]*Joined,
+	spans []Span,
+	cohorts []CohortConservation,
+) {
+	members := map[identity.CohortID][]*Joined{}
+	for _, req := range sortedRequests(joined) {
+		members[req.Cohort] = append(members[req.Cohort], joined[req])
+	}
+
+	for i := range cohorts {
+		c := &cohorts[i]
+		instants, ok := cohortInstants(members[c.Cohort])
+		if !ok {
+			continue // the presence check already named what is missing
+		}
+
+		c.Stages = make(map[string]int64, len(spans))
+		for j, span := range spans {
+			start, okStart := instants[span.Start]
+			end, okEnd := instants[span.End]
+			if !okStart || !okEnd {
+				continue
+			}
+			d := end - start
+			c.Stages[span.Name] = d
+			if span.Name == StageWForm {
+				c.FormationWaitNanos = d
+			}
+			if PreCycle(spans, j) {
+				continue
+			}
+			if span.Accounted {
+				c.AccountedNanos += d
+			} else {
+				c.UnaccountedNanos += d
+			}
+		}
+
+		c.ResidualNanos = c.MakespanNanos - c.AccountedNanos
+		if c.MakespanNanos > 0 {
+			c.ResidualFraction = float64(c.ResidualNanos) / float64(c.MakespanNanos)
+		}
+	}
+}
+
+// cohortInstants picks, for each stage, the member observation that lies on the
+// cohort's own critical path.
+//
+// Before the backend the cohort is paced by its earliest member: its clock has
+// been running since the first request was sent, formation begins at the first
+// arrival (ADR-0010), and the fan-out begins at the first submission. From the
+// end of execution onward it is paced by its latest: the backend is done when
+// the last execution is done, and the cohort is complete when its last member
+// is. The stages the whole cohort shares have one value and are unaffected by
+// the choice.
+//
+// The two rules meet inside the execution window, which is exactly where a
+// cohort's work fans out into B paths and then reconverges. So the cohort's
+// S_comp is the whole window the backend was busy for, and the queueing of later
+// members behind earlier ones lies inside it rather than beside it — which is
+// what it means for this cell to be interval-accounted (ADR-0009).
+func cohortInstants(members []*Joined) (map[events.Stage]int64, bool) {
+	if len(members) == 0 {
+		return nil, false
+	}
+	out := make(map[events.Stage]int64, events.StageCount)
+	for _, stage := range events.AllStages() {
+		var value int64
+		var seen bool
+		for _, m := range members {
+			v, ok := m.Stage(stage)
+			if !ok {
+				continue
+			}
+			switch {
+			case !seen:
+				value, seen = v, true
+			case pacedByLastMember(stage) && v > value:
+				value = v
+			case !pacedByLastMember(stage) && v < value:
+				value = v
+			}
+		}
+		if seen {
+			out[stage] = value
+		}
+	}
+	return out, true
+}
+
+// pacedByLastMember reports whether a cohort reaches a stage when its last
+// member does, rather than when its first does.
+func pacedByLastMember(s events.Stage) bool {
+	switch s {
+	case events.StageComputeEnd, events.StageAdapterResult,
+		events.StageAdapterSend, events.StageProxyRespRecv,
+		events.StageProxyFanout, events.StageClientRecv:
+		return true
+	default:
+		return false
+	}
 }
 
 // cohortCoverage computes the interval accounting for each cohort.
