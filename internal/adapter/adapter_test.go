@@ -24,6 +24,11 @@ type fakeExecutor struct {
 	reverse bool
 	failFor *identity.LogicalRequest
 	seen    []executor.Dispatch
+
+	// skew overrides the evidence's dispatch skew. Zero is a legitimate value —
+	// it is what one member measures — so it is set explicitly rather than left to
+	// the zero value of the struct.
+	skew *int64
 }
 
 func (f *fakeExecutor) Execute(_ context.Context, d executor.Dispatch) (executor.Result, executor.Evidence, error) {
@@ -53,12 +58,16 @@ func (f *fakeExecutor) Execute(_ context.Context, d executor.Dispatch) (executor
 		}
 		out.Members = append(out.Members, r)
 	}
-	return out, executor.Evidence{
-		Dispatched:        len(members),
-		DispatchSkewNanos: 42,
-		CPUNanos:          99,
-		CPUScope:          executor.CPUScopeProcess,
-	}, nil
+	evidence := executor.Evidence{
+		Dispatched: uint32(len(members)),
+		SkewNanos:  42,
+		CPUNanos:   99,
+		CPUScope:   events.CPUScopeProcess,
+	}
+	if f.skew != nil {
+		evidence.SkewNanos = *f.skew
+	}
+	return out, evidence, nil
 }
 
 type harness struct {
@@ -272,8 +281,69 @@ func TestAdapterReturnsItsDispatchEvidence(t *testing.T) {
 	if ev.GetDispatched() != 4 || ev.GetDispatchSkewNanos() != 42 {
 		t.Errorf("evidence = dispatched %d skew %d, want 4 / 42", ev.GetDispatched(), ev.GetDispatchSkewNanos())
 	}
-	if ev.GetCpuScope() != string(executor.CPUScopeProcess) {
-		t.Errorf("cpu scope = %q, want %q", ev.GetCpuScope(), executor.CPUScopeProcess)
+	if ev.GetCpuScope() != events.CPUScopeProcess.String() {
+		t.Errorf("cpu scope = %q, want %q", ev.GetCpuScope(), events.CPUScopeProcess)
+	}
+}
+
+// Evidence that reaches only the response envelope does not survive the run.
+// Every member of the dispatch carries it, because it describes the fan-out
+// rather than the member, and the envelope id is what groups them back.
+func TestDispatchEvidenceReachesEveryMemberRecord(t *testing.T) {
+	h := newHarness(t, identity.CellF10, 4, &fakeExecutor{})
+
+	env, err := h.builder.Aggregate(cohortMembers(4), payloads(4, 256), 900, 1000)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if _, err := h.service.Execute(context.Background(), env); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	records := h.records(t)
+	if len(records) != 4 {
+		t.Fatalf("got %d records, want one per member", len(records))
+	}
+	for _, d := range records {
+		rec := d.Record
+		if !rec.HasDispatch {
+			t.Errorf("%v carries no dispatch evidence; the adapter measured it and dropped it", rec.Request())
+			continue
+		}
+		if rec.Dispatch.Dispatched != 4 || rec.Dispatch.SkewNanos != 42 || rec.Dispatch.CPUNanos != 99 {
+			t.Errorf("%v evidence = %+v, want dispatched 4 / skew 42 / cpu 99", rec.Request(), rec.Dispatch)
+		}
+		if rec.Dispatch.CPUScope != events.CPUScopeProcess {
+			t.Errorf("%v cpu scope = %v, want %v; the number is not interpretable without it",
+				rec.Request(), rec.Dispatch.CPUScope, events.CPUScopeProcess)
+		}
+		if rec.EnvelopeID != identity.EnvelopeID(env.GetEnvelopeId()) {
+			t.Errorf("%v carries envelope %d, want %d", rec.Request(), rec.EnvelopeID, env.GetEnvelopeId())
+		}
+	}
+}
+
+// At A=off a dispatch releases one member, so the skew it measures is exactly
+// zero — a measurement, not an absence.
+func TestSingleMemberDispatchRecordsAMeasuredZeroSkew(t *testing.T) {
+	zero := int64(0)
+	h := newHarness(t, identity.CellF00, 1, &fakeExecutor{skew: &zero})
+
+	env := h.builder.Independent(identity.LogicalRequest{Cohort: 3, Ordinal: 0}, []byte("payload"), 1000)
+	if _, err := h.service.Execute(context.Background(), env); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	records := h.records(t)
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+	rec := records[0].Record
+	if !rec.HasDispatch {
+		t.Fatal("a skew of zero is what a one-member dispatch measures; the record must say it was measured")
+	}
+	if rec.Dispatch.Dispatched != 1 || rec.Dispatch.SkewNanos != 0 {
+		t.Errorf("evidence = %+v, want dispatched 1 / skew 0", rec.Dispatch)
 	}
 }
 

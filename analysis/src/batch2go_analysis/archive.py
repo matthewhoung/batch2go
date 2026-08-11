@@ -13,7 +13,10 @@ from pathlib import Path
 
 import polars as pl
 
-SCHEMA_VERSION = 1
+#: The record vocabulary this reader speaks. It became 2 when records started
+#: carrying the adapter's fan-out evidence: an older archive has no such columns
+#: and would otherwise read as a run whose adapter observed no dispatch.
+SCHEMA_VERSION = 2
 
 #: The 15 timestamps, in schema order (M2-PLAN §4.1). Every one is nullable:
 #: absence is typed, and a stage a cell's topology does not have must read as
@@ -60,6 +63,24 @@ IDENTITY_COLUMNS: dict[str, pl.DataType] = {
     "membership_count": pl.UInt32,
 }
 
+#: The adapter's fan-out evidence, with the dtype each column must load as.
+#:
+#: Every one is nullable, and for the same reason the timestamps are: a process
+#: that observed no dispatch writes nulls, while a dispatch of one member writes
+#: a skew of exactly zero. Reading those alike would report a tight fan-out for
+#: runs where the fan-out was never measured at all (ADR-0005).
+#:
+#: adapter_cpu_scope says what adapter_cpu_nanos counted. The value is not
+#: interpretable without it: the process scope counts the whole adapter's CPU
+#: over a dispatch's window, so a cohort's B concurrent dispatches at A=off each
+#: count the same work — comparable within a Factor A level and not across one.
+DISPATCH_COLUMNS: dict[str, pl.DataType] = {
+    "dispatched": pl.UInt32,
+    "dispatch_skew_nanos": pl.Int64,
+    "adapter_cpu_nanos": pl.Int64,
+    "adapter_cpu_scope": pl.String,
+}
+
 
 class ArchiveSchemaError(Exception):
     """The archive does not match the event-record schema."""
@@ -85,11 +106,15 @@ def check_schema(df: pl.DataFrame) -> None:
     """
     schema = df.schema
 
-    missing = [c for c in (*IDENTITY_COLUMNS, *STAGE_COLUMNS) if c not in schema]
+    missing = [
+        c
+        for c in (*IDENTITY_COLUMNS, *STAGE_COLUMNS, *DISPATCH_COLUMNS)
+        if c not in schema
+    ]
     if missing:
         raise ArchiveSchemaError(f"archive is missing columns: {missing}")
 
-    for column, dtype in IDENTITY_COLUMNS.items():
+    for column, dtype in (*IDENTITY_COLUMNS.items(), *DISPATCH_COLUMNS.items()):
         if schema[column] != dtype:
             raise ArchiveSchemaError(
                 f"column {column!r} loaded as {schema[column]}, expected {dtype}"
@@ -121,6 +146,18 @@ def check_schema(df: pl.DataFrame) -> None:
             raise ArchiveSchemaError(
                 f"{disagreements} rows disagree about {stage}: the presence mask and "
                 "the column must state the same thing, or absence is not typed"
+            )
+
+    # The fan-out evidence describes one dispatch, so a row either observed one
+    # or it did not. A row carrying a skew but no scope would be a CPU number
+    # with no definition, or a dispatch whose size nobody wrote down.
+    observed = df["dispatched"].is_not_null()
+    for column in DISPATCH_COLUMNS:
+        partial = int((df[column].is_not_null() != observed).sum())
+        if partial:
+            raise ArchiveSchemaError(
+                f"{partial} rows carry {column!r} without the rest of the dispatch "
+                "evidence; it describes one fan-out and travels whole"
             )
 
 

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/executor"
 	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/triton"
@@ -93,10 +94,10 @@ func (e *Executor) Execute(ctx context.Context, d executor.Dispatch) (executor.R
 	wg.Wait()
 
 	evidence := executor.Evidence{
-		Dispatched:        len(d.Members),
-		DispatchSkewNanos: dispatchSkew(results),
-		CPUNanos:          processCPUNanos() - cpuStart,
-		CPUScope:          executor.CPUScopeProcess,
+		Dispatched: uint32(len(d.Members)),
+		SkewNanos:  dispatchSkew(results),
+		CPUNanos:   processCPUNanos() - cpuStart,
+		CPUScope:   events.CPUScopeProcess,
 	}
 	return executor.Result{Members: results}, evidence, nil
 }

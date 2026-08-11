@@ -13,6 +13,7 @@ import pytest
 
 from batch2go_analysis.archive import (
     CHAINS,
+    DISPATCH_COLUMNS,
     IDENTITY_COLUMNS,
     SCHEMA_VERSION,
     STAGE_COLUMNS,
@@ -73,8 +74,25 @@ def d0_frame(rows: int = 4) -> pl.DataFrame:
         [pl.col(c).cast(dtype) for c, dtype in IDENTITY_COLUMNS.items()]
         + [pl.col(c).cast(pl.Int64) for c in STAGE_COLUMNS]
     )
-    return frame.with_columns(
+    frame = frame.with_columns(
         pl.Series("membership_uids", [[1] for _ in range(rows)], dtype=pl.List(pl.Int64))
+    )
+    # D0's load-generator records observed no dispatch, so the fan-out evidence
+    # is null throughout — the shape an adapter-less path actually produces.
+    return frame.with_columns(
+        [pl.lit(None).cast(dtype).alias(c) for c, dtype in DISPATCH_COLUMNS.items()]
+    )
+
+
+def with_dispatch(
+    frame: pl.DataFrame, *, dispatched: int, skew: int, cpu: int, scope: str
+) -> pl.DataFrame:
+    """Give every row the same fan-out evidence, as an adapter's records carry it."""
+    return frame.with_columns(
+        pl.lit(dispatched).cast(pl.UInt32).alias("dispatched"),
+        pl.lit(skew).cast(pl.Int64).alias("dispatch_skew_nanos"),
+        pl.lit(cpu).cast(pl.Int64).alias("adapter_cpu_nanos"),
+        pl.lit(scope).cast(pl.String).alias("adapter_cpu_scope"),
     )
 
 
@@ -112,6 +130,40 @@ def test_absent_by_topology_stays_null():
     for column in ("t_proxy_recv", "t_proxy_send", "t_adapter_recv", "t_adapter_dispatch"):
         assert frame[column].is_null().all(), f"{column} should be absent for D0"
         assert not stage_presence(int(frame["presence_mask"][0]), column)
+
+
+def test_dispatch_evidence_columns_are_known_to_the_schema():
+    """A one-member dispatch measured a skew of zero, and that must load as zero.
+
+    A never-measured skew is null. If the check did not know these columns, an
+    archive could carry a fan-out claim in a column nothing validates.
+    """
+    frame = with_dispatch(d0_frame(), dispatched=1, skew=0, cpu=840_000, scope="process")
+    check_schema(frame)
+
+    assert (frame["dispatch_skew_nanos"] == 0).all()
+    assert frame["dispatch_skew_nanos"].is_not_null().all()
+    assert (frame["adapter_cpu_scope"] == "process").all()
+
+
+def test_partial_dispatch_evidence_is_reported():
+    """The evidence describes one fan-out, so it arrives whole or not at all.
+
+    A skew with no scope beside it would be a CPU number with no definition —
+    the exact thing the scope exists to prevent.
+    """
+    frame = with_dispatch(
+        d0_frame(), dispatched=1, skew=0, cpu=840_000, scope="process"
+    ).with_columns(pl.lit(None).cast(pl.String).alias("adapter_cpu_scope"))
+    with pytest.raises(ArchiveSchemaError, match="adapter_cpu_scope"):
+        check_schema(frame)
+
+
+def test_unmeasured_dispatch_stays_null():
+    frame = d0_frame()
+    for column in DISPATCH_COLUMNS:
+        assert frame[column].is_null().all(), f"{column} should be absent without an adapter"
+    check_schema(frame)
 
 
 def test_unexpected_schema_version_is_reported():

@@ -89,6 +89,112 @@ func TestArchiveRoundTripIsLossless(t *testing.T) {
 	}
 }
 
+// dispatchRecords pair a load-generator record, which observed no dispatch at
+// all, with an adapter record whose one-member dispatch measured a skew of
+// exactly zero. The archive has to keep those two apart.
+func dispatchRecords() (absent, measuredZero events.Decoded) {
+	header := events.RunHeader{
+		Experiment:  "exp-walking-skeleton",
+		Session:     "sess-0001",
+		Run:         "run-0001",
+		Cell:        identity.CellF00,
+		ClockDomain: "cd-abcdef0123456789abcd",
+		WriterID:    3,
+	}
+
+	fromLoadGen := events.Record{Emitter: identity.EmitterLoadGen, Cohort: 1, Status: events.StatusOK}
+	fromLoadGen.SetStage(events.StageSched, 500)
+
+	fromAdapter := events.Record{Emitter: identity.EmitterAdapter, Cohort: 1, Status: events.StatusOK}
+	fromAdapter.SetStage(events.StageAdapterRecv, 700)
+	fromAdapter.SetDispatch(events.DispatchEvidence{
+		Dispatched: 1,
+		SkewNanos:  0,
+		CPUNanos:   0,
+		CPUScope:   events.CPUScopeProcess,
+	})
+
+	return events.Decoded{SchemaVersion: events.SchemaVersion, Header: header, Record: fromLoadGen},
+		events.Decoded{SchemaVersion: events.SchemaVersion, Header: header, Record: fromAdapter}
+}
+
+// A measured zero and a never-measured value must not archive as the same
+// number. An analysis that read them alike would report a tight fan-out for runs
+// where the fan-out was never observed.
+func TestMeasuredZeroDispatchArchivesApartFromAbsent(t *testing.T) {
+	absent, measured := dispatchRecords()
+
+	absentRow, measuredRow := ToRow(absent), ToRow(measured)
+	if absentRow.DispatchSkewNanos != nil {
+		t.Errorf("a record that observed no dispatch archived skew %d", *absentRow.DispatchSkewNanos)
+	}
+	if absentRow.AdapterCPUScope != nil {
+		t.Errorf("a record that observed no dispatch archived scope %q", *absentRow.AdapterCPUScope)
+	}
+	if measuredRow.DispatchSkewNanos == nil {
+		t.Fatal("a one-member dispatch measured a skew of zero; the archive must carry it")
+	}
+	if *measuredRow.DispatchSkewNanos != 0 {
+		t.Errorf("dispatch_skew_nanos = %d, want a measured 0", *measuredRow.DispatchSkewNanos)
+	}
+	if measuredRow.AdapterCPUScope == nil || *measuredRow.AdapterCPUScope != events.CPUScopeProcess.String() {
+		t.Errorf("adapter_cpu_scope = %v, want %q; the cpu number is not interpretable without it",
+			measuredRow.AdapterCPUScope, events.CPUScopeProcess)
+	}
+
+	path := filepath.Join(t.TempDir(), "events.parquet")
+	if err := Write(path, []events.Decoded{absent, measured}); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("read archive: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("read %d rows, want 2", len(got))
+	}
+	if got[0].Record.HasDispatch {
+		t.Errorf("the load generator's record came back carrying evidence %+v", got[0].Record.Dispatch)
+	}
+	if !got[1].Record.HasDispatch {
+		t.Fatal("the adapter's measured zero came back as never-measured")
+	}
+	if got[1].Record.Dispatch != measured.Record.Dispatch {
+		t.Errorf("evidence = %+v, want %+v", got[1].Record.Dispatch, measured.Record.Dispatch)
+	}
+}
+
+// Half the evidence is not evidence: a CPU number with no scope beside it has no
+// definition, and a skew with no dispatch size is a claim about a fan-out nobody
+// counted. The archive reader refuses those rows rather than completing them
+// with zeros, which is what the analysis reader does independently.
+func TestPartialDispatchEvidenceIsRefused(t *testing.T) {
+	_, measured := dispatchRecords()
+
+	for name, blank := range map[string]func(*Row){
+		"no dispatched": func(r *Row) { r.Dispatched = nil },
+		"no skew":       func(r *Row) { r.DispatchSkewNanos = nil },
+		"no cpu":        func(r *Row) { r.AdapterCPUNanos = nil },
+		"no scope":      func(r *Row) { r.AdapterCPUScope = nil },
+	} {
+		row := ToRow(measured)
+		blank(&row)
+
+		if _, err := FromRow(row); err == nil {
+			t.Errorf("%s: a partial row should be refused", name)
+		}
+	}
+
+	// And a scope nobody can name is reported rather than read as "unspecified",
+	// which is a different claim about the number beside it.
+	row := ToRow(measured)
+	unknown := "per-goroutine"
+	row.AdapterCPUScope = &unknown
+	if _, err := FromRow(row); err == nil {
+		t.Error("an unknown cpu scope should be refused")
+	}
+}
+
 // A stage outside the cell's topology must arrive in the archive as a null, not
 // as the instant zero.
 func TestAbsentStagesArchiveAsNull(t *testing.T) {

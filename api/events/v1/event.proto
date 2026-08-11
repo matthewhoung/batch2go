@@ -30,6 +30,18 @@ enum Status {
   STATUS_TIMEOUT = 3;
 }
 
+// CPUScope says what an adapter CPU measurement counted. It is archived beside
+// the value because the two are not separable: CPU_SCOPE_PROCESS counts the
+// whole process's CPU over a dispatch's window, so a cohort's B concurrent
+// dispatches at A=off each count the same work — comparable within a Factor A
+// level and not across one. CPU_SCOPE_DISPATCH is reserved for a measurement
+// that bounds one dispatch; nothing produces it yet.
+enum CPUScope {
+  CPU_SCOPE_UNSPECIFIED = 0;
+  CPU_SCOPE_PROCESS = 1;
+  CPU_SCOPE_DISPATCH = 2;
+}
+
 // EventRecord is one process's contribution to the path of one logical request.
 //
 // Records are written append-only per process and joined offline by the
@@ -100,4 +112,20 @@ message EventRecord {
   // len(membership_uids) only when the record hit its fixed capacity, which the
   // validator reports as truncated evidence rather than accepting silently.
   uint32 membership_count = 44;
+
+  // ---- adapter dispatch evidence ----
+  //
+  // What the adapter observed about the fan-out this member was released in:
+  // n=1 per envelope at A=off, n=B at A=on. Every member of one fan-out carries
+  // the same values, because they describe the fan-out and not the member.
+  //
+  // The first three are optional for the same reason the timestamps are. A skew
+  // of zero is what a one-member dispatch measures, and a process that observed
+  // no dispatch at all writes nothing — absence is typed, never encoded as zero
+  // (ADR-0005). adapter_cpu_scope is not optional because an unstated scope has
+  // its own name and is not the same claim as a missing one.
+  optional uint32 dispatched = 45;
+  optional int64 dispatch_skew_nanos = 46;
+  optional int64 adapter_cpu_nanos = 47;
+  CPUScope adapter_cpu_scope = 48;
 }

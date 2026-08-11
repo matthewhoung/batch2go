@@ -80,10 +80,10 @@ func (s *Service) Execute(ctx context.Context, env *envelopev1.RequestEnvelope) 
 		TAdapterRecv:  recvAt,
 		TAdapterSend:  sendAt,
 		Evidence: &envelopev1.AdapterEvidence{
-			Dispatched:        uint32(evidence.Dispatched),
-			DispatchSkewNanos: evidence.DispatchSkewNanos,
+			Dispatched:        evidence.Dispatched,
+			DispatchSkewNanos: evidence.SkewNanos,
 			CpuNanos:          evidence.CPUNanos,
-			CpuScope:          string(evidence.CPUScope),
+			CpuScope:          evidence.CPUScope.String(),
 		},
 		Results: make([]*envelopev1.LogicalResult, 0, len(result.Members)),
 	}
@@ -92,17 +92,24 @@ func (s *Service) Execute(ctx context.Context, env *envelopev1.RequestEnvelope) 
 	payloads := payloadBytesByMember(env)
 	for _, m := range result.Members {
 		resp.Results = append(resp.Results, logicalResult(m))
-		s.record(env, m, recvAt, sendAt, envelopeBytes, payloads[m.Member])
+		s.record(env, m, evidence, recvAt, sendAt, envelopeBytes, payloads[m.Member])
 	}
 	return resp, nil
 }
 
 // record writes the adapter's four timestamps for one member, plus the
-// membership the execution attested. The adapter is where the attestation
-// arrives, so it is where that evidence is recorded.
+// membership the execution attested and what the adapter observed about the
+// fan-out it was released in. The adapter is where both arrive, so it is where
+// they are recorded — until now the dispatch evidence reached the response
+// envelope and went no further, so it did not survive the run.
+//
+// Every member of one dispatch is given the same evidence, because it describes
+// the dispatch rather than the member; the envelope id on each record is what
+// lets the validator group them back.
 func (s *Service) record(
 	env *envelopev1.RequestEnvelope,
 	m executor.MemberResult,
+	evidence executor.Evidence,
 	recvAt, sendAt int64,
 	envelopeBytes, logicalBytes uint32,
 ) {
@@ -113,6 +120,7 @@ func (s *Service) record(
 	rec.EnvelopeID = identity.EnvelopeID(env.GetEnvelopeId())
 	rec.EnvelopeBytes = envelopeBytes
 	rec.LogicalBytes = logicalBytes
+	rec.SetDispatch(evidence)
 
 	rec.SetStage(events.StageAdapterRecv, recvAt)
 	rec.SetStage(events.StageAdapterDispatch, m.DispatchedAt)

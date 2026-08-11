@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/executor"
 	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/triton"
@@ -123,13 +124,13 @@ func TestSingleMemberDispatchSubmitsOnce(t *testing.T) {
 	if evidence.Dispatched != 1 {
 		t.Errorf("dispatched = %d, want 1", evidence.Dispatched)
 	}
-	if evidence.DispatchSkewNanos != 0 {
-		t.Errorf("skew = %dns; one member cannot skew against itself", evidence.DispatchSkewNanos)
+	if evidence.SkewNanos != 0 {
+		t.Errorf("skew = %dns; one member cannot skew against itself", evidence.SkewNanos)
 	}
 	// Zero is a measurement here, not an absence: the scope says what the CPU
 	// number counted, and it is recorded even when the skew is trivially zero.
-	if evidence.CPUScope != executor.CPUScopeProcess {
-		t.Errorf("cpu scope = %q, want %q", evidence.CPUScope, executor.CPUScopeProcess)
+	if evidence.CPUScope != events.CPUScopeProcess {
+		t.Errorf("cpu scope = %q, want %q", evidence.CPUScope, events.CPUScopeProcess)
 	}
 	if len(result.Members) != 1 || result.Members[0].Member != members[0] {
 		t.Errorf("result does not describe the submitted member: %+v", result.Members)
@@ -165,13 +166,13 @@ func TestFanOutSubmitsConcurrentlyRatherThanInSequence(t *testing.T) {
 		t.Errorf("fan-out took %v for %d submissions of %v each; it did not overlap them",
 			elapsed, len(members), hold)
 	}
-	if evidence.Dispatched != len(members) {
+	if int(evidence.Dispatched) != len(members) {
 		t.Errorf("dispatched = %d, want %d", evidence.Dispatched, len(members))
 	}
 	// Contract tests bound skew well below one submission's service time; here
 	// the fixture makes that concrete.
-	if evidence.DispatchSkewNanos >= int64(hold) {
-		t.Errorf("dispatch skew %dns is not far below one submission of %v", evidence.DispatchSkewNanos, hold)
+	if evidence.SkewNanos >= int64(hold) {
+		t.Errorf("dispatch skew %dns is not far below one submission of %v", evidence.SkewNanos, hold)
 	}
 }
 
@@ -229,7 +230,7 @@ func TestOneFailingMemberDoesNotCorruptItsNeighbours(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute returned an error for a per-member failure: %v", err)
 	}
-	if evidence.Dispatched != len(members) {
+	if int(evidence.Dispatched) != len(members) {
 		t.Errorf("dispatched = %d, want %d — a failure does not un-dispatch a member", evidence.Dispatched, len(members))
 	}
 	if len(result.Members) != len(members) {

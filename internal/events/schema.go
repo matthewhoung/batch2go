@@ -20,7 +20,12 @@ import (
 
 // SchemaVersion is the version of the record vocabulary below. Every record
 // carries it so an archived bundle is readable without out-of-band context.
-const SchemaVersion = 1
+//
+// It became 2 when the record started carrying the adapter's fan-out evidence.
+// A record written before that claims no dispatch, which is exactly what a
+// process that observed none also claims — so the version moves and an older
+// stream is refused rather than read as evidence it never carried.
+const SchemaVersion = 2
 
 // Stage identifies one of the 15 timestamps (M2-PLAN §4.1). Values are the
 // schema's canonical 1-based numbering and are part of the archived format.
@@ -230,6 +235,93 @@ func (s Status) String() string {
 	return fmt.Sprintf("Status(%d)", uint8(s))
 }
 
+// CPUScope names what an adapter CPU measurement actually counted. It travels
+// with the value because the two are not separable: a number whose definition
+// changed between experimental conditions is not a measurement of those
+// conditions.
+//
+// It lives here rather than beside the executor that produces it because the
+// archive is where the number is finally read, and a reader who cannot see the
+// definition beside the value has no way to know which contrasts it may enter.
+type CPUScope uint8
+
+const (
+	// CPUScopeUnspecified is a CPU value whose definition was not stated. It
+	// enters no contrast at all.
+	CPUScopeUnspecified CPUScope = 0
+
+	// CPUScopeProcess is whole-process CPU sampled around a dispatch, via
+	// getrusage(RUSAGE_SELF).
+	//
+	// It is NOT comparable across Factor A levels, and that is a property of the
+	// measurement rather than of the treatment. At A=off a cohort's B dispatches
+	// run concurrently and each attributes the entire process's CPU over its own
+	// overlapping window, so the same work is counted B times; at A=on one
+	// dispatch attributes it once. Differencing the two would produce a number
+	// that moves with B for reasons that have nothing to do with envelope
+	// aggregation — exactly the treatment-correlated artifact this project
+	// measures GC and tracing overhead in order to bound.
+	CPUScopeProcess CPUScope = 1
+
+	// CPUScopeDispatch is reserved for a measurement that counts only the work of
+	// one dispatch and is therefore comparable across A levels. Nothing produces
+	// it yet: Go's scheduler migrates goroutines across threads, so RUSAGE_THREAD
+	// does not bound a dispatch either. When something does, it coexists with the
+	// process scope in the archive rather than replacing it, and a reader can tell
+	// which definition produced each number.
+	CPUScopeDispatch CPUScope = 2
+)
+
+var cpuScopeNames = map[CPUScope]string{
+	CPUScopeUnspecified: "unspecified",
+	CPUScopeProcess:     "process",
+	CPUScopeDispatch:    "dispatch",
+}
+
+func (s CPUScope) String() string {
+	if n, ok := cpuScopeNames[s]; ok {
+		return n
+	}
+	return fmt.Sprintf("CPUScope(%d)", uint8(s))
+}
+
+// ParseCPUScope resolves a scope name read back from an archive.
+func ParseCPUScope(s string) (CPUScope, error) {
+	for scope, n := range cpuScopeNames {
+		if n == s {
+			return scope, nil
+		}
+	}
+	return CPUScopeUnspecified, fmt.Errorf("events: unknown cpu scope %q", s)
+}
+
+// ComparableAcrossFactorA reports whether a scope may enter a contrast between
+// A=on and A=off.
+func (s CPUScope) ComparableAcrossFactorA() bool { return s == CPUScopeDispatch }
+
+// DispatchEvidence is what the adapter observed about one fan-out: how many
+// members it released together, how far apart the first and last submissions
+// were, and what the release cost it.
+//
+// It is evidence, never a conclusion. Whether a cohort met exact-B conformance,
+// and whether a fan-out was tight enough, are computed offline.
+type DispatchEvidence struct {
+	// Dispatched is how many members the adapter released in one call: 1 per
+	// envelope at A=off, B at A=on.
+	Dispatched uint32
+
+	// SkewNanos is first-to-last submit within that call. At n=1 there is nothing
+	// to skew and it is zero — a measured zero, which is why the evidence carries
+	// its own presence rather than letting zero stand for absence.
+	SkewNanos int64
+
+	// CPUNanos is the adapter's cost for the dispatch and CPUScope says what that
+	// number counted. The two are archived together because the value alone is
+	// not interpretable.
+	CPUNanos int64
+	CPUScope CPUScope
+}
+
 // MaxMembership caps how many uids one record stores. Cohort sizes in the design
 // are 4 and 16; the headroom exists so that cross-cohort coalescing — the thing
 // membership evidence is meant to detect — is observable rather than silently
@@ -262,6 +354,17 @@ type Record struct {
 	EnvelopeBytes uint32
 	BatchSize     uint32
 
+	// Dispatch is the adapter's evidence about the fan-out this member was
+	// released in, and HasDispatch whether the record carries any at all. They are
+	// set together by SetDispatch, for the same reason Presence and TS are: a skew
+	// of zero is a measurement — at one member per dispatch there is nothing to
+	// skew — and must stay distinguishable from a process that measured no
+	// dispatch (ADR-0005). Every member of one fan-out carries the same evidence,
+	// because it describes the fan-out rather than the member, and repeating it is
+	// what makes it survive the offline join on (cohort, ordinal).
+	Dispatch    DispatchEvidence
+	HasDispatch bool
+
 	// Membership holds the self-attested uid set of this request's execution
 	// (ADR-0007), and MembershipCount the size the execution claimed. They differ
 	// only when the evidence exceeded MaxMembership.
@@ -283,6 +386,13 @@ func (r *Record) Stage(s Stage) (int64, bool) {
 		return 0, false
 	}
 	return r.TS[s], true
+}
+
+// SetDispatch records the adapter's fan-out evidence and marks it present in
+// one operation, so a zero skew and an unmeasured one cannot be confused.
+func (r *Record) SetDispatch(e DispatchEvidence) {
+	r.Dispatch = e
+	r.HasDispatch = true
 }
 
 // SetMembership records the uid set an execution attested to. count is the size

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/identity"
 )
 
@@ -61,61 +62,15 @@ func (r Result) Failed() error {
 	return nil
 }
 
-// CPUScope names what a CPU measurement actually counted. It travels with the
-// value because the two are not separable: a number whose definition changed
-// between conditions is not a measurement of those conditions.
-type CPUScope string
-
-const (
-	// CPUScopeProcess is whole-process CPU sampled around a dispatch, via
-	// getrusage(RUSAGE_SELF).
-	//
-	// It is NOT comparable across Factor A levels, and that is a property of the
-	// measurement rather than of the treatment. At A=off a cohort's B dispatches
-	// run concurrently and each attributes the entire process's CPU over its own
-	// overlapping window, so the same work is counted B times; at A=on one
-	// dispatch attributes it once. Differencing the two would produce a number
-	// that moves with B for reasons that have nothing to do with envelope
-	// aggregation — exactly the treatment-correlated artifact this project
-	// measures GC and tracing overhead in order to bound.
-	//
-	// So it is recorded as a diagnostic. Nothing enforces that yet: the value does
-	// not reach the event schema or the archive, and no validator rule consumes
-	// the scope — carrying it here is what makes those the next steps rather than
-	// a thing to remember. Until then the scope is a label on a number that only
-	// the response envelope sees.
-	CPUScopeProcess CPUScope = "process"
-
-	// CPUScopeDispatch is reserved for a measurement that counts only the work of
-	// one dispatch and is therefore comparable across A levels. Nothing produces
-	// it yet: Go's scheduler migrates goroutines across threads, so
-	// RUSAGE_THREAD does not bound a dispatch either. When something does, it
-	// coexists with the process scope in the archive rather than replacing it,
-	// and a reader can tell which definition produced each number.
-	CPUScopeDispatch CPUScope = "dispatch"
-)
-
-// ComparableAcrossFactorA reports whether a scope may enter a contrast between
-// A=on and A=off. It has no callers yet, because nothing yet computes such a
-// contrast; it exists so that the first thing that does has to ask.
-func (s CPUScope) ComparableAcrossFactorA() bool { return s == CPUScopeDispatch }
-
 // Evidence is what the executor observed about its own dispatch.
-type Evidence struct {
-	Dispatched int
-
-	// DispatchSkewNanos is first-to-last submit within one fan-out call. At n=1
-	// there is nothing to skew and it is zero — recorded as zero rather than
-	// omitted, so "no skew" and "not measured" stay distinguishable.
-	DispatchSkewNanos int64
-
-	// CPUNanos is the adapter's cost for the dispatch, and CPUScope says what that
-	// number counted. It is mandatory evidence for the fan-out cells (M1 Rev 4
-	// decision 1), but only within one Factor A level while the scope is
-	// process-wide.
-	CPUNanos int64
-	CPUScope CPUScope
-}
+//
+// It is events.DispatchEvidence because that is where it ends up: the adapter
+// writes it into the record stream unchanged, and the archive is where the
+// numbers are finally read. Restating the shape here would create two
+// definitions that have to be kept in agreement by hand — and the CPU scope, in
+// particular, is only worth carrying if it reaches the reader attached to its
+// value (M1 Rev 4 decision 1).
+type Evidence = events.DispatchEvidence
 
 // Executor turns a dispatch into results and evidence.
 type Executor interface {

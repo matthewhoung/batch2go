@@ -53,6 +53,12 @@ func fullRecord() Record {
 		identity.LogicalRequest{Cohort: 17, Ordinal: 2}.UID(),
 		identity.LogicalRequest{Cohort: 17, Ordinal: 3}.UID(),
 	})
+	r.SetDispatch(DispatchEvidence{
+		Dispatched: 4,
+		SkewNanos:  12_500,
+		CPUNanos:   840_000,
+		CPUScope:   CPUScopeProcess,
+	})
 	return r
 }
 
@@ -146,6 +152,12 @@ func TestGeneratedEncodingParsesAsHandRolledDecoding(t *testing.T) {
 		BatchSize:       want.BatchSize,
 		MembershipCount: want.MembershipCount,
 	}
+	if want.HasDispatch {
+		msg.Dispatched = &want.Dispatch.Dispatched
+		msg.DispatchSkewNanos = &want.Dispatch.SkewNanos
+		msg.AdapterCpuNanos = &want.Dispatch.CPUNanos
+		msg.AdapterCpuScope = eventsv1.CPUScope(want.Dispatch.CPUScope)
+	}
 	for _, uid := range want.MembershipUIDs() {
 		msg.MembershipUids = append(msg.MembershipUids, int64(uid))
 	}
@@ -231,6 +243,95 @@ func TestOversizedMembershipReportsTruncation(t *testing.T) {
 	}
 }
 
+// Dispatch evidence has to survive with its presence intact in both directions.
+// A skew of zero is what one member measures, and a record that observed no
+// dispatch measured nothing — the two must not decode to the same thing.
+func TestMeasuredZeroDispatchIsNotAbsentDispatch(t *testing.T) {
+	h := testHeader()
+
+	measured := Record{Emitter: identity.EmitterAdapter, Cohort: 1, Status: StatusOK}
+	measured.SetDispatch(DispatchEvidence{Dispatched: 1, SkewNanos: 0, CPUNanos: 0, CPUScope: CPUScopeProcess})
+
+	got, err := Decode(encodeForTest(t, h, &measured))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Record.HasDispatch {
+		t.Error("a dispatch of one member measured a skew of zero; the record must not read as unmeasured")
+	}
+	if got.Record.Dispatch != measured.Dispatch {
+		t.Errorf("evidence = %+v, want %+v", got.Record.Dispatch, measured.Dispatch)
+	}
+
+	// And the mirror: a load-generator record never observed a dispatch.
+	absent := Record{Emitter: identity.EmitterLoadGen, Cohort: 1, Status: StatusOK}
+	absent.SetStage(StageSched, 500)
+
+	got, err = Decode(encodeForTest(t, h, &absent))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Record.HasDispatch {
+		t.Errorf("a record that observed no dispatch carries evidence %+v", got.Record.Dispatch)
+	}
+}
+
+// The generated implementation has to see the same presence the hand-rolled one
+// wrote, or the two codecs disagree about what "measured" means.
+func TestMeasuredZeroDispatchSurvivesAsGeneratedPresence(t *testing.T) {
+	h := testHeader()
+	rec := Record{Emitter: identity.EmitterAdapter, Cohort: 1, Status: StatusOK}
+	rec.SetDispatch(DispatchEvidence{Dispatched: 1, CPUScope: CPUScopeProcess})
+
+	var got eventsv1.EventRecord
+	if err := proto.Unmarshal(encodeForTest(t, h, &rec), &got); err != nil {
+		t.Fatalf("generated decoder rejected hand-rolled encoding: %v", err)
+	}
+	if got.DispatchSkewNanos == nil {
+		t.Error("dispatch_skew_nanos is absent; a measured zero must arrive as a present zero")
+	} else if *got.DispatchSkewNanos != 0 {
+		t.Errorf("dispatch_skew_nanos = %d, want 0", *got.DispatchSkewNanos)
+	}
+	if got.AdapterCpuNanos == nil {
+		t.Error("adapter_cpu_nanos is absent; it was measured")
+	}
+	if got.GetAdapterCpuScope() != eventsv1.CPUScope_CPU_SCOPE_PROCESS {
+		t.Errorf("adapter_cpu_scope = %v, want process", got.GetAdapterCpuScope())
+	}
+}
+
+// The widest record the schema permits must still fit the bound the writer
+// reserves, or a full-membership record would grow a bank's buffer — the one
+// allocation this codec exists to avoid.
+func TestWidestRecordFitsTheBodyBound(t *testing.T) {
+	uids := make([]identity.UID, MaxMembership)
+	for i := range uids {
+		// Ordinals at the top of the encodable range, so every uid varint is wide.
+		uids[i] = identity.LogicalRequest{Cohort: 4294967295, Ordinal: identity.MaxOrdinal}.UID()
+	}
+	rec := Record{
+		Emitter:       identity.EmitterAdapter,
+		Seq:           1<<64 - 1,
+		Cohort:        4294967295,
+		Ordinal:       identity.MaxOrdinal,
+		EnvelopeID:    1<<64 - 1,
+		ExecutionID:   1<<64 - 1,
+		Status:        StatusTimeout,
+		LogicalBytes:  1<<32 - 1,
+		EnvelopeBytes: 1<<32 - 1,
+		BatchSize:     1<<32 - 1,
+	}
+	for _, s := range AllStages() {
+		rec.SetStage(s, -1) // widest varint an int64 timestamp can encode
+	}
+	rec.SetMembership(uids)
+	rec.SetDispatch(DispatchEvidence{Dispatched: 1<<32 - 1, SkewNanos: -1, CPUNanos: -1, CPUScope: CPUScopeDispatch})
+
+	if got := len(appendRecord(nil, &rec, 1<<32-1)); got > maxBodySize {
+		t.Errorf("the widest record encodes to %d bytes, past the %d the writer reserves", got, maxBodySize)
+	}
+}
+
 func TestTritonRequestIDRoundTrips(t *testing.T) {
 	for _, want := range []identity.LogicalRequest{
 		{Cohort: 0, Ordinal: 0},
@@ -282,6 +383,11 @@ func assertRecordsEqual(t *testing.T, got, want Record) {
 		if gok && gts != wts {
 			t.Errorf("%s = %d, want %d", s, gts, wts)
 		}
+	}
+	if got.HasDispatch != want.HasDispatch {
+		t.Errorf("dispatch evidence presence = %v, want %v", got.HasDispatch, want.HasDispatch)
+	} else if got.HasDispatch && got.Dispatch != want.Dispatch {
+		t.Errorf("dispatch evidence = %+v, want %+v", got.Dispatch, want.Dispatch)
 	}
 	if got.MembershipCount != want.MembershipCount {
 		t.Errorf("membership_count = %d, want %d", got.MembershipCount, want.MembershipCount)

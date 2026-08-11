@@ -140,6 +140,61 @@ func (Status) EnumDescriptor() ([]byte, []int) {
 	return file_api_events_v1_event_proto_rawDescGZIP(), []int{1}
 }
 
+// CPUScope says what an adapter CPU measurement counted. It is archived beside
+// the value because the two are not separable: CPU_SCOPE_PROCESS counts the
+// whole process's CPU over a dispatch's window, so a cohort's B concurrent
+// dispatches at A=off each count the same work — comparable within a Factor A
+// level and not across one. CPU_SCOPE_DISPATCH is reserved for a measurement
+// that bounds one dispatch; nothing produces it yet.
+type CPUScope int32
+
+const (
+	CPUScope_CPU_SCOPE_UNSPECIFIED CPUScope = 0
+	CPUScope_CPU_SCOPE_PROCESS     CPUScope = 1
+	CPUScope_CPU_SCOPE_DISPATCH    CPUScope = 2
+)
+
+// Enum value maps for CPUScope.
+var (
+	CPUScope_name = map[int32]string{
+		0: "CPU_SCOPE_UNSPECIFIED",
+		1: "CPU_SCOPE_PROCESS",
+		2: "CPU_SCOPE_DISPATCH",
+	}
+	CPUScope_value = map[string]int32{
+		"CPU_SCOPE_UNSPECIFIED": 0,
+		"CPU_SCOPE_PROCESS":     1,
+		"CPU_SCOPE_DISPATCH":    2,
+	}
+)
+
+func (x CPUScope) Enum() *CPUScope {
+	p := new(CPUScope)
+	*p = x
+	return p
+}
+
+func (x CPUScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CPUScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_events_v1_event_proto_enumTypes[2].Descriptor()
+}
+
+func (CPUScope) Type() protoreflect.EnumType {
+	return &file_api_events_v1_event_proto_enumTypes[2]
+}
+
+func (x CPUScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CPUScope.Descriptor instead.
+func (CPUScope) EnumDescriptor() ([]byte, []int) {
+	return file_api_events_v1_event_proto_rawDescGZIP(), []int{2}
+}
+
 // EventRecord is one process's contribution to the path of one logical request.
 //
 // Records are written append-only per process and joined offline by the
@@ -202,8 +257,23 @@ type EventRecord struct {
 	// len(membership_uids) only when the record hit its fixed capacity, which the
 	// validator reports as truncated evidence rather than accepting silently.
 	MembershipCount uint32 `protobuf:"varint,44,opt,name=membership_count,json=membershipCount,proto3" json:"membership_count,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// ---- adapter dispatch evidence ----
+	//
+	// What the adapter observed about the fan-out this member was released in:
+	// n=1 per envelope at A=off, n=B at A=on. Every member of one fan-out carries
+	// the same values, because they describe the fan-out and not the member.
+	//
+	// The first three are optional for the same reason the timestamps are. A skew
+	// of zero is what a one-member dispatch measures, and a process that observed
+	// no dispatch at all writes nothing — absence is typed, never encoded as zero
+	// (ADR-0005). adapter_cpu_scope is not optional because an unstated scope has
+	// its own name and is not the same claim as a missing one.
+	Dispatched        *uint32  `protobuf:"varint,45,opt,name=dispatched,proto3,oneof" json:"dispatched,omitempty"`
+	DispatchSkewNanos *int64   `protobuf:"varint,46,opt,name=dispatch_skew_nanos,json=dispatchSkewNanos,proto3,oneof" json:"dispatch_skew_nanos,omitempty"`
+	AdapterCpuNanos   *int64   `protobuf:"varint,47,opt,name=adapter_cpu_nanos,json=adapterCpuNanos,proto3,oneof" json:"adapter_cpu_nanos,omitempty"`
+	AdapterCpuScope   CPUScope `protobuf:"varint,48,opt,name=adapter_cpu_scope,json=adapterCpuScope,proto3,enum=batch2go.events.v1.CPUScope" json:"adapter_cpu_scope,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *EventRecord) Reset() {
@@ -488,11 +558,39 @@ func (x *EventRecord) GetMembershipCount() uint32 {
 	return 0
 }
 
+func (x *EventRecord) GetDispatched() uint32 {
+	if x != nil && x.Dispatched != nil {
+		return *x.Dispatched
+	}
+	return 0
+}
+
+func (x *EventRecord) GetDispatchSkewNanos() int64 {
+	if x != nil && x.DispatchSkewNanos != nil {
+		return *x.DispatchSkewNanos
+	}
+	return 0
+}
+
+func (x *EventRecord) GetAdapterCpuNanos() int64 {
+	if x != nil && x.AdapterCpuNanos != nil {
+		return *x.AdapterCpuNanos
+	}
+	return 0
+}
+
+func (x *EventRecord) GetAdapterCpuScope() CPUScope {
+	if x != nil {
+		return x.AdapterCpuScope
+	}
+	return CPUScope_CPU_SCOPE_UNSPECIFIED
+}
+
 var File_api_events_v1_event_proto protoreflect.FileDescriptor
 
 const file_api_events_v1_event_proto_rawDesc = "" +
 	"\n" +
-	"\x19api/events/v1/event.proto\x12\x12batch2go.events.v1\"\x84\r\n" +
+	"\x19api/events/v1/event.proto\x12\x12batch2go.events.v1\"\x96\x0f\n" +
 	"\vEventRecord\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12#\n" +
 	"\rexperiment_id\x18\x02 \x01(\tR\fexperimentId\x12\x1d\n" +
@@ -536,7 +634,13 @@ const file_api_events_v1_event_proto_rawDesc = "" +
 	"\n" +
 	"batch_size\x18* \x01(\rR\tbatchSize\x12+\n" +
 	"\x0fmembership_uids\x18+ \x03(\x03B\x02\x10\x01R\x0emembershipUids\x12)\n" +
-	"\x10membership_count\x18, \x01(\rR\x0fmembershipCountB\n" +
+	"\x10membership_count\x18, \x01(\rR\x0fmembershipCount\x12#\n" +
+	"\n" +
+	"dispatched\x18- \x01(\rH\x0fR\n" +
+	"dispatched\x88\x01\x01\x123\n" +
+	"\x13dispatch_skew_nanos\x18. \x01(\x03H\x10R\x11dispatchSkewNanos\x88\x01\x01\x12/\n" +
+	"\x11adapter_cpu_nanos\x18/ \x01(\x03H\x11R\x0fadapterCpuNanos\x88\x01\x01\x12H\n" +
+	"\x11adapter_cpu_scope\x180 \x01(\x0e2\x1c.batch2go.events.v1.CPUScopeR\x0fadapterCpuScopeB\n" +
 	"\n" +
 	"\b_t_schedB\x10\n" +
 	"\x0e_t_client_sendB\x0f\n" +
@@ -552,7 +656,10 @@ const file_api_events_v1_event_proto_rawDesc = "" +
 	"\x0f_t_adapter_sendB\x14\n" +
 	"\x12_t_proxy_resp_recvB\x11\n" +
 	"\x0f_t_proxy_fanoutB\x10\n" +
-	"\x0e_t_client_recv*s\n" +
+	"\x0e_t_client_recvB\r\n" +
+	"\v_dispatchedB\x16\n" +
+	"\x14_dispatch_skew_nanosB\x14\n" +
+	"\x12_adapter_cpu_nanos*s\n" +
 	"\aEmitter\x12\x17\n" +
 	"\x13EMITTER_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fEMITTER_LOADGEN\x10\x01\x12\x11\n" +
@@ -563,7 +670,11 @@ const file_api_events_v1_event_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tSTATUS_OK\x10\x01\x12\x10\n" +
 	"\fSTATUS_ERROR\x10\x02\x12\x12\n" +
-	"\x0eSTATUS_TIMEOUT\x10\x03B9Z7github.com/matthewhoung/batch2go/api/events/v1;eventsv1b\x06proto3"
+	"\x0eSTATUS_TIMEOUT\x10\x03*T\n" +
+	"\bCPUScope\x12\x19\n" +
+	"\x15CPU_SCOPE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11CPU_SCOPE_PROCESS\x10\x01\x12\x16\n" +
+	"\x12CPU_SCOPE_DISPATCH\x10\x02B9Z7github.com/matthewhoung/batch2go/api/events/v1;eventsv1b\x06proto3"
 
 var (
 	file_api_events_v1_event_proto_rawDescOnce sync.Once
@@ -577,21 +688,23 @@ func file_api_events_v1_event_proto_rawDescGZIP() []byte {
 	return file_api_events_v1_event_proto_rawDescData
 }
 
-var file_api_events_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_api_events_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_api_events_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
 var file_api_events_v1_event_proto_goTypes = []any{
 	(Emitter)(0),        // 0: batch2go.events.v1.Emitter
 	(Status)(0),         // 1: batch2go.events.v1.Status
-	(*EventRecord)(nil), // 2: batch2go.events.v1.EventRecord
+	(CPUScope)(0),       // 2: batch2go.events.v1.CPUScope
+	(*EventRecord)(nil), // 3: batch2go.events.v1.EventRecord
 }
 var file_api_events_v1_event_proto_depIdxs = []int32{
 	0, // 0: batch2go.events.v1.EventRecord.emitter:type_name -> batch2go.events.v1.Emitter
 	1, // 1: batch2go.events.v1.EventRecord.status:type_name -> batch2go.events.v1.Status
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	2, // 2: batch2go.events.v1.EventRecord.adapter_cpu_scope:type_name -> batch2go.events.v1.CPUScope
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_api_events_v1_event_proto_init() }
@@ -605,7 +718,7 @@ func file_api_events_v1_event_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_events_v1_event_proto_rawDesc), len(file_api_events_v1_event_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   1,
 			NumExtensions: 0,
 			NumServices:   0,

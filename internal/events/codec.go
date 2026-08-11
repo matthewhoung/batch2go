@@ -48,6 +48,11 @@ const (
 	fieldBatchSize       = 42
 	fieldMembershipUIDs  = 43
 	fieldMembershipCount = 44
+
+	fieldDispatched        = 45
+	fieldDispatchSkewNanos = 46
+	fieldAdapterCPUNanos   = 47
+	fieldAdapterCPUScope   = 48
 )
 
 const (
@@ -55,10 +60,28 @@ const (
 	wireLen    = 2
 )
 
-// maxBodySize bounds the encoding of everything but the run-scoped header:
-// identity and counters, 15 timestamps at 12 bytes each, and a full membership
-// set. It exists so buffers are sized once rather than grown on the hot path.
-const maxBodySize = 1024
+// maxBodySize bounds the encoding of everything but the run-scoped header.
+//
+// It is a real bound rather than a hint: the writer reserves this much of a bank
+// before appending, so a record that outgrew it would grow the bank's buffer —
+// an allocation on the hot path, which is the one thing this codec exists to
+// avoid. TestWidestRecordFitsTheBodyBound holds the arithmetic below to account.
+const (
+	// maxVarintField is the widest a varint field can encode: a two-byte tag plus
+	// a ten-byte value.
+	maxVarintField = 2 + binary.MaxVarintLen64
+
+	// varintFields counts them: seven identity values, the presence mask and
+	// status, fifteen timestamps, three byte-and-shape counters, the membership
+	// count, and four fields of dispatch evidence.
+	varintFields = 7 + 2 + StageCount + 3 + 1 + 4
+
+	maxBodySize = varintFields*maxVarintField +
+		// the rendered Triton request id, with its tag and length
+		(2 + 1 + tritonRequestIDMax) +
+		// the packed membership list, with its tag and length
+		(2 + 2 + MaxMembership*binary.MaxVarintLen64)
+)
 
 // RunHeader is the run-scoped identity every record in a stream shares. It is
 // encoded once by the writer instead of per record.
@@ -146,6 +169,19 @@ func appendRecord(dst []byte, r *Record, writerID identity.WriterID) []byte {
 		}
 	}
 	dst = appendVarintField(dst, fieldMembershipCount, uint64(r.MembershipCount))
+
+	if r.HasDispatch {
+		// Written unconditionally, including zero: these are `optional`, so the tag
+		// itself is the presence signal — which is the whole point, because a
+		// one-member dispatch measures a skew of exactly zero.
+		dst = appendTag(dst, fieldDispatched, wireVarint)
+		dst = binary.AppendUvarint(dst, uint64(r.Dispatch.Dispatched))
+		dst = appendTag(dst, fieldDispatchSkewNanos, wireVarint)
+		dst = binary.AppendUvarint(dst, uint64(r.Dispatch.SkewNanos))
+		dst = appendTag(dst, fieldAdapterCPUNanos, wireVarint)
+		dst = binary.AppendUvarint(dst, uint64(r.Dispatch.CPUNanos))
+		dst = appendVarintField(dst, fieldAdapterCPUScope, uint64(r.Dispatch.CPUScope))
+	}
 	return dst
 }
 
@@ -335,6 +371,19 @@ func (d *Decoded) setVarint(field int, v uint64) error {
 		d.Record.BatchSize = uint32(v)
 	case fieldMembershipCount:
 		d.Record.MembershipCount = uint32(v)
+	case fieldDispatched:
+		d.Record.Dispatch.Dispatched = uint32(v)
+		d.Record.HasDispatch = true
+	case fieldDispatchSkewNanos:
+		d.Record.Dispatch.SkewNanos = int64(v)
+		d.Record.HasDispatch = true
+	case fieldAdapterCPUNanos:
+		d.Record.Dispatch.CPUNanos = int64(v)
+		d.Record.HasDispatch = true
+	case fieldAdapterCPUScope:
+		// The scope alone does not establish presence: it is an implicit-presence
+		// enum, so a stated scope always arrives with the values it describes.
+		d.Record.Dispatch.CPUScope = CPUScope(v)
 	}
 	return nil
 }

@@ -63,6 +63,16 @@ type Row struct {
 	BatchSize       uint32  `parquet:"batch_size"`
 	MembershipUIDs  []int64 `parquet:"membership_uids,list"`
 	MembershipCount uint32  `parquet:"membership_count"`
+
+	// The adapter's fan-out evidence, nullable for the same reason the timestamps
+	// are: a process that observed no dispatch archives nulls, while a dispatch of
+	// one member archives a skew of zero. An analysis that read those as the same
+	// number would conclude the fan-out was tight in runs where it was never
+	// measured at all.
+	Dispatched        *uint32 `parquet:"dispatched,optional"`
+	DispatchSkewNanos *int64  `parquet:"dispatch_skew_nanos,optional"`
+	AdapterCPUNanos   *int64  `parquet:"adapter_cpu_nanos,optional"`
+	AdapterCPUScope   *string `parquet:"adapter_cpu_scope,optional"`
 }
 
 // stageField maps a stage to its slot in a Row, so the converter states the
@@ -137,6 +147,14 @@ func ToRow(d events.Decoded) Row {
 	for _, uid := range d.Record.MembershipUIDs() {
 		row.MembershipUIDs = append(row.MembershipUIDs, int64(uid))
 	}
+	if d.Record.HasDispatch {
+		e := d.Record.Dispatch
+		scope := e.CPUScope.String()
+		row.Dispatched = &e.Dispatched
+		row.DispatchSkewNanos = &e.SkewNanos
+		row.AdapterCPUNanos = &e.CPUNanos
+		row.AdapterCPUScope = &scope
+	}
 	return row
 }
 
@@ -191,6 +209,41 @@ func FromRow(row Row) (events.Decoded, error) {
 	}
 	d.Record.SetMembership(uids)
 	d.Record.MembershipCount = row.MembershipCount
+
+	// The evidence describes one fan-out, so the row either carries all of it or
+	// none. A half-present row is refused rather than completed with zeros: a CPU
+	// number with no scope beside it has no definition, and a skew with no
+	// dispatch size is a claim about a fan-out nobody counted. The analysis
+	// reader refuses the same shapes, independently.
+	present := 0
+	for _, carried := range []bool{
+		row.Dispatched != nil,
+		row.DispatchSkewNanos != nil,
+		row.AdapterCPUNanos != nil,
+		row.AdapterCPUScope != nil,
+	} {
+		if carried {
+			present++
+		}
+	}
+	switch present {
+	case 0:
+	case 4:
+		scope, err := events.ParseCPUScope(*row.AdapterCPUScope)
+		if err != nil {
+			return events.Decoded{}, err
+		}
+		d.Record.SetDispatch(events.DispatchEvidence{
+			Dispatched: *row.Dispatched,
+			SkewNanos:  *row.DispatchSkewNanos,
+			CPUNanos:   *row.AdapterCPUNanos,
+			CPUScope:   scope,
+		})
+	default:
+		return events.Decoded{}, fmt.Errorf(
+			"parquet: %v carries %d of the 4 dispatch-evidence columns; it describes one fan-out and travels whole",
+			d.Record.Request(), present)
+	}
 	return d, nil
 }
 
