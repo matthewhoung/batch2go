@@ -77,5 +77,58 @@ type Executor interface {
 	Execute(context.Context, Dispatch) (Result, Evidence, error)
 }
 
+// Kind names an executor implementation.
+type Kind string
+
+const (
+	// KindIndividual submits each member as its own [1,…] request. It is the
+	// V=off executor and it does not care how many members arrived together:
+	// one per envelope at A=off, B at A=on.
+	KindIndividual Kind = "individual"
+
+	// KindDynamic submits each member individually against the dynamic model
+	// entry and lets the backend's scheduler form the batch.
+	KindDynamic Kind = "dynamic"
+
+	// KindPreformed submits one already-built [B,…] tensor, so the batch is
+	// formed before the backend sees it.
+	KindPreformed Kind = "preformed"
+)
+
+// implementedKinds are the executors this build has. It is a statement about
+// what is linked in, not about the design: the other two are defined above
+// because a cell that needs one must be able to say so and be refused by name.
+var implementedKinds = map[Kind]bool{KindIndividual: true}
+
+// Implemented reports whether this build has the executor.
+func (k Kind) Implemented() bool { return implementedKinds[k] }
+
+// SelectKind returns the executor a cell's declared properties require.
+//
+// Selection follows from what the cell declares and from nothing else — never
+// from the shape of an envelope that arrived, because a one-request envelope is
+// what A=off and a misconfigured A=on both look like.
+//
+// A cell whose executor this build does not have is an error rather than a fall
+// back to the individual one. Running F01's members as B individual executions
+// and recording them under a V=on label would produce n=B, J=B and every
+// execution of batch size 1 — which is exactly what that cell's own checks
+// watch for, so the substitution would pass every one of them.
+func SelectKind(cell identity.Cell) (Kind, error) {
+	kind := KindIndividual
+	switch {
+	case !cell.VectorizesCompute():
+		kind = KindIndividual
+	case cell.PreformsBatch():
+		kind = KindPreformed
+	default:
+		kind = KindDynamic
+	}
+	if !kind.Implemented() {
+		return "", fmt.Errorf("executor: cell %s needs the %s executor, which this build does not have", cell, kind)
+	}
+	return kind, nil
+}
+
 // Clock reads the executor's monotonic clock domain.
 type Clock func() int64

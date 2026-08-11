@@ -156,8 +156,9 @@ def check_schema(df: pl.DataFrame) -> None:
         partial = int((df[column].is_not_null() != observed).sum())
         if partial:
             raise ArchiveSchemaError(
-                f"{partial} rows carry {column!r} without the rest of the dispatch "
-                "evidence; it describes one fan-out and travels whole"
+                f"{partial} rows disagree about {column!r}: the dispatch evidence "
+                "describes one fan-out and travels whole, so a row carries all four "
+                "columns or none"
             )
 
 

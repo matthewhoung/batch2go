@@ -91,8 +91,17 @@ func (s *Service) Execute(ctx context.Context, env *envelopev1.RequestEnvelope) 
 	envelopeBytes := uint32(envelope.WireBytes(env))
 	payloads := payloadBytesByMember(env)
 	for _, m := range result.Members {
+		// A result for a member the envelope never carried has no payload size to
+		// attribute, and recording zero would archive a measured-looking zero for a
+		// quantity Validate guarantees is non-empty. It is a protocol violation by
+		// the executor, so it fails the envelope rather than the member.
+		logicalBytes, ok := payloads[m.Member]
+		if !ok {
+			return nil, fmt.Errorf("adapter: executor returned a result for %v, which envelope %d does not carry",
+				m.Member, env.GetEnvelopeId())
+		}
 		resp.Results = append(resp.Results, logicalResult(m))
-		s.record(env, m, evidence, recvAt, sendAt, envelopeBytes, payloads[m.Member])
+		s.record(env, m, evidence, recvAt, sendAt, envelopeBytes, logicalBytes)
 	}
 	return resp, nil
 }

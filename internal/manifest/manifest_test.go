@@ -127,12 +127,26 @@ func TestPathEndpointsMustMatchTheCellTopology(t *testing.T) {
 
 // Cells beyond this slice parse but must not run: a manifest naming one fails
 // visibly rather than falling back to something that looks like a result.
+// The manifest validator consults the one authority rather than a list of its
+// own. A second list here could disagree with the runner's, and the
+// disagreement would surface as a manifest that validated and then failed after
+// a model repository had been materialized.
 func TestUnimplementedCellsAreRefused(t *testing.T) {
-	for _, cell := range []identity.Cell{identity.CellF01, identity.CellF10, identity.CellF11D, identity.CellF11P} {
+	for _, cell := range identity.AllCells() {
+		if cell == identity.CellD0 {
+			continue // the direct path has its own manifest shape, tested above
+		}
 		m := validF00()
 		m.Cell = cell
-		if err := m.Validate(); err == nil {
+
+		err := m.Validate()
+		switch {
+		case cell.Implemented() && err != nil:
+			t.Errorf("cell %s is implemented and must be accepted: %v", cell, err)
+		case !cell.Implemented() && err == nil:
 			t.Errorf("cell %s is not implemented and must be refused", cell)
+		case !cell.Implemented() && !strings.Contains(err.Error(), string(cell)):
+			t.Errorf("cell %s: refusal %q should name the cell", cell, err)
 		}
 	}
 }

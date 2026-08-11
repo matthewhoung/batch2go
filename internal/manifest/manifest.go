@@ -218,8 +218,8 @@ func (m *Manifest) Validate() error {
 	if err != nil {
 		return err
 	}
-	if !cell.Implemented() {
-		return fmt.Errorf("cell %s is not implemented by this build; spec 0001 covers D0 and F00", cell)
+	if err := cell.CheckImplemented(); err != nil {
+		return err
 	}
 	if cell.UsesProxy() && m.Transport.ProxyEndpoint == "" {
 		return fmt.Errorf("cell %s traverses the shared path and needs transport.proxy_endpoint", cell)

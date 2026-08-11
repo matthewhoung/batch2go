@@ -101,11 +101,14 @@ func (p *sharedPath) Close() error      { return p.client.Close() }
 
 // checkCellImplemented refuses a cell this build cannot run, rather than falling
 // back to something that would look like a result.
+//
+// The list it consults is identity's, not one of its own. A second list here
+// could disagree with the manifest validator's, and the disagreement would
+// surface as a run that passed validation and then failed after materializing a
+// model repository and starting a data plane.
 func checkCellImplemented(cell identity.Cell) error {
-	switch cell {
-	case identity.CellD0, identity.CellF00:
-		return nil
-	default:
-		return fmt.Errorf("runner: cell %s is not executable by this build; spec 0001 implements D0 and F00", cell)
+	if err := cell.CheckImplemented(); err != nil {
+		return fmt.Errorf("runner: %w", err)
 	}
+	return nil
 }

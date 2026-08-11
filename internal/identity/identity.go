@@ -33,8 +33,14 @@ const (
 	CellF00Seq Cell = "F00-seq" // diagnostic: serial release
 )
 
-// Cells implemented by spec 0001, the walking skeleton.
-var walkingSkeletonCells = map[Cell]bool{CellD0: true, CellF00: true}
+// implementedCells are the cells this build can run end to end.
+//
+// It is the single authority. The manifest validator, the runner and the
+// adapter all consult it rather than each carrying a list, because three lists
+// can disagree — and a disagreement shows up as a run that parsed, materialized
+// a model repository, started a data plane, and only then discovered that the
+// cell it was asked for does not exist here.
+var implementedCells = map[Cell]bool{CellD0: true, CellF00: true}
 
 // AllCells lists every cell the design defines, in contract-table order.
 func AllCells() []Cell {
@@ -53,9 +59,47 @@ func ParseCell(s string) (Cell, error) {
 }
 
 // Implemented reports whether this slice of the platform can run the cell.
-// Cells beyond the walking skeleton parse but do not run: a manifest naming one
-// fails visibly at validation rather than silently falling back (ARCHITECTURE §3.7).
-func (c Cell) Implemented() bool { return walkingSkeletonCells[c] }
+// Cells beyond it parse but do not run: a manifest naming one fails visibly at
+// validation rather than silently falling back (ARCHITECTURE §3.7).
+func (c Cell) Implemented() bool { return implementedCells[c] }
+
+// ImplementedCells lists the cells this build can run, in contract-table order.
+func ImplementedCells() []Cell {
+	out := make([]Cell, 0, len(implementedCells))
+	for _, c := range AllCells() {
+		if implementedCells[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// CheckImplemented refuses a cell this build cannot run, naming it and what is
+// available instead.
+//
+// The refusal is worded once, here, so that every gate between a manifest and a
+// running process gives the same answer for the same reason. A cell that is not
+// in the design at all is reported as that, which is a different mistake from
+// naming a cell the design defines but this slice has not built.
+func (c Cell) CheckImplemented() error {
+	if c.Implemented() {
+		return nil
+	}
+	if _, err := ParseCell(string(c)); err != nil {
+		return err
+	}
+	return fmt.Errorf("identity: cell %s is in the design but not implemented by this build, which runs %s",
+		c, joinCells(ImplementedCells()))
+}
+
+// PreformsBatch reports whether the cell's [B,…] tensor is built before the
+// backend sees it, rather than by the backend's own scheduler.
+//
+// It is the formation-location contrast F11-P exists to draw, and it is a third
+// property of a cell rather than a third factor: F11-P sits outside the
+// factorial for exactly that reason. Executor selection reads it here rather
+// than testing a cell name at the call site.
+func (c Cell) PreformsBatch() bool { return c == CellF11P }
 
 // UsesProxy reports whether the cell traverses the shared path. D0 is the only
 // direct-path condition; every factorial cell goes through proxy and adapter.

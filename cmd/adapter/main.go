@@ -22,6 +22,7 @@ import (
 	"github.com/matthewhoung/batch2go/internal/envelope"
 	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/events/clockdomain"
+	"github.com/matthewhoung/batch2go/internal/executor"
 	"github.com/matthewhoung/batch2go/internal/executor/individual"
 	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/triton"
@@ -61,6 +62,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := parsedCell.CheckImplemented(); err != nil {
+		return err
+	}
 
 	// Every process establishes its own clock domain and checks it against the
 	// one the run declared. Agreeing is what makes cross-process subtraction
@@ -90,7 +94,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	exec, err := individual.New(submitter, clock.Now)
+	exec, err := newExecutor(parsedCell, submitter, clock.Now)
 	if err != nil {
 		return err
 	}
@@ -153,4 +157,25 @@ func run() error {
 	// The counters live in this process, so they are persisted beside the stream:
 	// a record this service dropped has to remain reportable after it exits.
 	return events.WriteStats(*eventsPath, writer.Stats())
+}
+
+// newExecutor builds the executor the cell's declared factor levels selected.
+//
+// The selection is made in internal/executor, from the cell's own properties;
+// this switch only names which implementation each kind resolves to. A kind
+// with no case here cannot be reached — SelectKind refuses an unimplemented
+// kind first — but the default is an error rather than the individual executor,
+// because a silent fall back is exactly the failure this wiring exists to
+// prevent: it would run a V=on cell as V=off and record it under the V=on label.
+func newExecutor(cell identity.Cell, submitter *triton.Submitter, now executor.Clock) (executor.Executor, error) {
+	kind, err := executor.SelectKind(cell)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case executor.KindIndividual:
+		return individual.New(submitter, now)
+	default:
+		return nil, fmt.Errorf("adapter: cell %s selected the %s executor, which this binary does not wire", cell, kind)
+	}
 }
