@@ -109,6 +109,20 @@ type harness struct {
 
 func newHarness(t *testing.T, cell identity.Cell, targetB int, backend *fakeBackend) *harness {
 	t.Helper()
+	// Long enough that no test below reaches it by accident: the cohorts that are
+	// meant to form all have their members, and the ones that are meant to fail
+	// fail on admission. The tests that exercise the deadline name their own.
+	return newHarnessWithDeadline(t, cell, targetB, backend, 5*time.Second)
+}
+
+func newHarnessWithDeadline(
+	t *testing.T,
+	cell identity.Cell,
+	targetB int,
+	backend *fakeBackend,
+	deadline time.Duration,
+) *harness {
+	t.Helper()
 
 	builder, err := envelope.NewBuilder(envelope.Config{
 		Experiment: "exp", Session: "sess", Run: "run-1",
@@ -129,7 +143,7 @@ func newHarness(t *testing.T, cell identity.Cell, targetB int, backend *fakeBack
 
 	cfg := Config{Cell: cell, Run: "run-1", TargetB: targetB}
 	if cell.AggregatesEnvelopes() {
-		cfg.FormationDeadline = 5 * time.Second
+		cfg.FormationDeadline = deadline
 	}
 
 	clock := &stepClock{}
@@ -649,6 +663,119 @@ func TestABackendRefusalReachesEveryMember(t *testing.T) {
 		}
 		if !r.Presence.Has(events.StageCohortSeal) {
 			t.Errorf("%v records no seal, and its cohort was sealed before the send", r.Request())
+		}
+	}
+}
+
+// A cohort that cannot form fails whole, at a bounded time, and sends nothing.
+//
+// No short envelope is ever sent: B is fixed by the conformance gate, so
+// shipping B−1 members would silently change the quantity the design holds
+// constant — a wrong-model-class failure rather than a degradation (ADR-0010).
+func TestACohortThatNeverCompletesFailsAtItsDeadline(t *testing.T) {
+	const deadline = 150 * time.Millisecond
+	h := newHarnessWithDeadline(t, identity.CellF10, 4, &fakeBackend{}, deadline)
+
+	started := time.Now()
+	answers := h.release(7, 0, 1, 2) // ordinal 3 never arrives
+	waited := time.Since(started)
+
+	for _, a := range answers {
+		if a.err == nil {
+			t.Errorf("%v was answered, but its cohort never assembled", a.member)
+		}
+	}
+	if !mentions(answers, "did not assemble") {
+		t.Errorf("no caller was told the cohort failed to assemble: %v", errorsOf(answers))
+	}
+	// The absent member is the only diagnostic information the failure carries,
+	// so the cause names it rather than reporting a bare count.
+	if !mentions(answers, "[3]") {
+		t.Errorf("the failure does not name the ordinal that never arrived: %v", errorsOf(answers))
+	}
+
+	// It was the formation deadline that ended this, not the caller's own
+	// context. Those are different failures and only one of them has a name.
+	if waited > 20*deadline {
+		t.Errorf("the cohort was held %s against a %s deadline", waited, deadline)
+	}
+	if envs := h.backend.envelopes(); len(envs) != 0 {
+		t.Errorf("the backend saw %d envelopes; a cohort of 3 is never sent as a cohort of 4", len(envs))
+	}
+
+	// The held members record an error, not a timeout: they did not themselves
+	// time out. The timeout belongs to the member that never arrived, and the
+	// load generator is what records it (ADR-0010).
+	records := h.records(t)
+	if len(records) != 3 {
+		t.Fatalf("the proxy wrote %d records, want one per member it held", len(records))
+	}
+	for _, d := range records {
+		r := d.Record
+		if r.Status != events.StatusError {
+			t.Errorf("held member %v was recorded %s, want error", r.Request(), r.Status)
+		}
+		if r.Presence.Has(events.StageCohortSeal) {
+			t.Errorf("%v carries a seal, and its cohort was never sealed", r.Request())
+		}
+	}
+}
+
+// A member arriving after its cohort's deadline receives the same named
+// failure. Opening a fresh formation would let a late arrival resurrect a cohort
+// that has already been judged, and the run would then contain two verdicts on
+// one cohort id.
+func TestALateArrivalInheritsTheFormationFailure(t *testing.T) {
+	h := newHarnessWithDeadline(t, identity.CellF10, 4, &fakeBackend{}, 100*time.Millisecond)
+
+	answers := h.release(7, 0, 1, 2)
+	if !mentions(answers, "did not assemble") {
+		t.Fatalf("the cohort did not fail by name: %v", errorsOf(answers))
+	}
+
+	_, err := h.submit(7, 3)
+	if err == nil {
+		t.Fatal("the late member was admitted to a fresh formation")
+	}
+	if !strings.Contains(err.Error(), "did not assemble") {
+		t.Errorf("the late member was told %q, not its cohort's own cause", err)
+	}
+	if envs := h.backend.envelopes(); len(envs) != 0 {
+		t.Errorf("the backend saw %d envelopes after a failed formation", len(envs))
+	}
+}
+
+// Shutdown never waits on a cohort that will not assemble. A proxy that let its
+// held members run out their own deadlines would turn a bounded failure into a
+// stop that takes as long as the request timeout.
+func TestShutdownFailsCohortsStillForming(t *testing.T) {
+	h := newHarnessWithDeadline(t, identity.CellF10, 4, &fakeBackend{}, time.Hour)
+
+	held := make(chan answer, 2)
+	for _, ord := range []identity.Ordinal{0, 1} {
+		go func(ord identity.Ordinal) {
+			resp, err := h.submit(7, ord)
+			held <- answer{member: identity.LogicalRequest{Cohort: 7, Ordinal: ord}, resp: resp, err: err}
+		}(ord)
+	}
+
+	// Both members are on their way in, and Close races them deliberately. It has
+	// to reach them whichever side of the door they are on: a member already held
+	// is woken where it waits, and a member arriving afterwards is refused rather
+	// than beginning a formation nobody will ever finish. Neither outcome is a
+	// wait of an hour, and the test needs no view of which happened.
+	h.service.Close()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case a := <-held:
+			if a.err == nil {
+				t.Errorf("%v was answered by a proxy that had shut down", a.member)
+			} else if !strings.Contains(a.err.Error(), "shutting down") {
+				t.Errorf("%v was told %q, which does not name the shutdown", a.member, a.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a held member outlived the shutdown that was supposed to release it")
 		}
 	}
 }

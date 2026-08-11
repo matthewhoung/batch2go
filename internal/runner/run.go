@@ -365,6 +365,9 @@ func execute(
 	// come before the recorded ones so the two are separable in the trace stream.
 	for i := 0; i < m.Cohort.WarmupCount; i++ {
 		cohort := workload.NewCohort(identity.CohortID(i), m.Cohort.Size, true)
+		// Warm-up is the one place a failed cohort does end the run, and for the
+		// reason recorded cohorts do not: warm-up writes no records, so nothing
+		// would testify to the failure and the run would go on looking clean.
 		if _, err := releaseCohort(ctx, m, clock, client, &cohort, nil); err != nil {
 			return fmt.Errorf("runner: warm-up cohort %d: %w", i, svc.explain(err))
 		}
@@ -387,7 +390,17 @@ func execute(
 		cohort := workload.NewCohort(identity.CohortID(m.Cohort.WarmupCount+i), m.Cohort.Size, false)
 		outcomes, err := releaseCohort(ctx, m, clock, client, &cohort, loadgen)
 		if err != nil {
-			return svc.explain(err)
+			// A cohort that failed is scoped to itself: its members are recorded
+			// failed, the run goes on, and the verdict — not this loop — is what
+			// refuses the run (ADR-0010). Stopping here instead would convert
+			// treatment-correlated missingness into a lost run, which is the outcome
+			// that makes it impossible to report how often it happens. A data plane
+			// that is gone is the other case entirely, and it ends the run: every
+			// cohort after it would fail for that one reason.
+			if svc.died() != nil || ctx.Err() != nil {
+				return svc.explain(err)
+			}
+			opts.Logf("cohort %d failed and the run continues: %v", cohort.ID, err)
 		}
 		for req, out := range outcomes {
 			results[req] = out

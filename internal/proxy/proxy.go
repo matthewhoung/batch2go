@@ -85,6 +85,11 @@ type Service struct {
 	// failed to form and are now that cohort id's verdict. It stays empty at
 	// A=off, where nothing is assembled.
 	forming map[identity.CohortID]*formation
+
+	// closed says the proxy will assemble no more cohorts. It is what makes Close
+	// final: without it a request arriving during shutdown would open a formation
+	// nobody is left to complete, and wait there for its own deadline.
+	closed bool
 }
 
 // New builds the proxy service.

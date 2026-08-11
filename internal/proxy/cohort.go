@@ -22,6 +22,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	envelopev1 "github.com/matthewhoung/batch2go/api/envelope/v1"
 	"github.com/matthewhoung/batch2go/internal/envelope"
@@ -56,6 +57,13 @@ type formation struct {
 	slots   []slot
 	arrived int
 	sealAt  int64
+
+	// sealed says the cohort completed, and deadline is the timer that would have
+	// failed it if it had not. The flag exists because the timer may already be
+	// running when the last member is admitted: both take the service's mutex, and
+	// whichever arrives second has to see that the question was already settled.
+	sealed   bool
+	deadline *time.Timer
 
 	// terminal is the cohort-level cause when formation failed. It is named once,
 	// here, rather than B times at the members it takes down with it: B members
@@ -110,10 +118,20 @@ func (s *Service) join(member identity.LogicalRequest, payload []byte) (*formati
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return nil, false, fmt.Errorf(
+			"cohort %d cannot form: the proxy is shutting down and will assemble no more cohorts", member.Cohort)
+	}
+
 	f, open := s.forming[member.Cohort]
 	if !open {
 		f = newFormation(member.Cohort, s.cfg.TargetB)
 		s.forming[member.Cohort] = f
+		// Formation begins at the first member's arrival, and so does the bound on
+		// it. Measuring from the scheduled release instead would fold the first
+		// hop's transfer into a bound meant to constrain assembly, and the bound
+		// would then drift with payload size (ADR-0010).
+		f.deadline = time.AfterFunc(s.cfg.FormationDeadline, func() { s.expire(f) })
 	}
 	if f.terminal != nil {
 		// The cohort has already been judged. A member arriving now inherits that
@@ -143,6 +161,10 @@ func (s *Service) join(member identity.LogicalRequest, payload []byte) (*formati
 	// member, because that admission is when formation ends — any instant read
 	// after the lock is released would also contain whatever the proxy did next.
 	f.sealAt = s.now()
+	f.sealed = true
+	// Stop is allowed to lose: if the timer has already fired, its goroutine is
+	// waiting for this mutex and will find the cohort sealed.
+	f.deadline.Stop()
 
 	// The cohort id is spoken for from here on. What stays in the registry is not
 	// the sealed formation — its members are still reading that one — but a
@@ -157,6 +179,61 @@ func (s *Service) join(member identity.LogicalRequest, payload []byte) (*formati
 	// its own.
 	s.forming[f.cohort] = sealedAlready(f.cohort, f.targetB)
 	return f, true, nil
+}
+
+// expire fails a cohort whose members did not all arrive in time.
+//
+// The cost of this failure is one request at A=off and B at A=on, and it rises
+// with payload — treatment-correlated missingness concentrated in the regime
+// where the crossover claim lives. It is bounded and named here so that it is
+// reported rather than discovered in the data (ADR-0010).
+func (s *Service) expire(f *formation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if f.sealed || f.terminal != nil {
+		return // the cohort was settled while this timer was on its way to the lock
+	}
+	f.failLocked(fmt.Errorf(
+		"cohort %d did not assemble within %s: ordinals %v never arrived",
+		f.cohort, s.cfg.FormationDeadline, f.absent()))
+}
+
+// absent lists the ordinals a forming cohort is still missing. They are the only
+// diagnostic information the failure carries: the run's other record of them is
+// whatever status the load generator gave requests that never got here.
+func (f *formation) absent() []identity.Ordinal {
+	var out []identity.Ordinal
+	for ord, s := range f.slots {
+		if !s.admitted {
+			out = append(out, identity.Ordinal(ord))
+		}
+	}
+	return out
+}
+
+// Close stops the proxy assembling cohorts and fails every one it is still
+// holding.
+//
+// Without it a shutdown would wait on cohorts that can no longer complete —
+// their remaining members are never coming, because whatever was sending them is
+// stopping too — and a bounded failure would become a stop that takes as long as
+// the request timeout. Arrivals after this point are refused for the same
+// reason: a formation opened now would be one nobody will finish.
+func (s *Service) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closed = true
+	for _, f := range s.forming {
+		if f.sealed || f.terminal != nil {
+			continue
+		}
+		f.deadline.Stop()
+		f.failLocked(fmt.Errorf(
+			"cohort %d did not assemble: the proxy is shutting down and ordinals %v had not arrived",
+			f.cohort, f.absent()))
+	}
 }
 
 // closedGate is the done channel the terminal markers share. Nothing ever waits

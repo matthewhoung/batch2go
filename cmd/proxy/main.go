@@ -147,6 +147,13 @@ func run() error {
 	defer cancel()
 	go func() {
 		<-ctx.Done()
+		// Release the cohorts still assembling before waiting on the handlers.
+		// GracefulStop waits for every in-flight call to return, and a held member
+		// is a call that will not return until its cohort does — so without this
+		// the shutdown would last as long as the formation deadline, or as long as
+		// the client's request timeout for a cohort whose remaining members are
+		// never coming because the load generator is stopping too.
+		service.Close()
 		server.GracefulStop()
 	}()
 
