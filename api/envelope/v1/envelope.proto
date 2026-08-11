@@ -73,7 +73,12 @@ message RequestEnvelope {
   int64 t_proxy_send = 14;
   optional int64 t_cohort_seal = 15;
 
-  // Byte accounting, measured rather than assumed.
+  // Byte accounting, measured rather than assumed. The two partition the
+  // marshaled size exactly: logical_bytes is what the experiment asked to move,
+  // auxiliary_bytes the framing the protocol added to move it. The second is
+  // the per-envelope cost Factor A changes — a cohort pays it B times at A=off
+  // and once at A=on — so it is the aggregation effect's raw material and not a
+  // restatement of the first.
   uint64 logical_bytes = 16;
   uint64 auxiliary_bytes = 17;
 }
@@ -139,16 +144,18 @@ service Backend {
 // request over one stable client protocol, whatever the cell's Factor A level.
 // The proxy, not the client, decides whether requests share an envelope.
 message ClientRequest {
+  // Tag 6 carried the barrier release instant. Nothing read it: at A=off the
+  // load generator owns t_cohort_seal and records it itself, and at A=on the
+  // proxy mints its own when it seals the envelope (ADR-0001). The tag is
+  // reserved rather than freed so it cannot acquire a second meaning at v1.
+  reserved 6;
+  reserved "t_cohort_seal";
+
   string run_id = 1;
   uint32 cohort_id = 2;
   uint32 ordinal = 3;
   int64 uid = 4;
   bytes payload = 5;
-
-  // t_cohort_seal is the barrier release instant, carried at A=off because the
-  // load generator owns the seal there and the proxy records it on the client's
-  // behalf (ADR-0001).
-  optional int64 t_cohort_seal = 6;
 }
 
 // ClientResponse is one logical request's result as the client sees it.

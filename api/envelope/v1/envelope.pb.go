@@ -189,7 +189,12 @@ type RequestEnvelope struct {
 	// A=off the proxy does no joining and emits no seal (ADR-0001).
 	TProxySend  int64  `protobuf:"varint,14,opt,name=t_proxy_send,json=tProxySend,proto3" json:"t_proxy_send,omitempty"`
 	TCohortSeal *int64 `protobuf:"varint,15,opt,name=t_cohort_seal,json=tCohortSeal,proto3,oneof" json:"t_cohort_seal,omitempty"`
-	// Byte accounting, measured rather than assumed.
+	// Byte accounting, measured rather than assumed. The two partition the
+	// marshaled size exactly: logical_bytes is what the experiment asked to move,
+	// auxiliary_bytes the framing the protocol added to move it. The second is
+	// the per-envelope cost Factor A changes — a cohort pays it B times at A=off
+	// and once at A=on — so it is the aggregation effect's raw material and not a
+	// restatement of the first.
 	LogicalBytes   uint64 `protobuf:"varint,16,opt,name=logical_bytes,json=logicalBytes,proto3" json:"logical_bytes,omitempty"`
 	AuxiliaryBytes uint64 `protobuf:"varint,17,opt,name=auxiliary_bytes,json=auxiliaryBytes,proto3" json:"auxiliary_bytes,omitempty"`
 	unknownFields  protoimpl.UnknownFields
@@ -626,16 +631,12 @@ func (x *ResponseEnvelope) GetTAdapterSend() int64 {
 // request over one stable client protocol, whatever the cell's Factor A level.
 // The proxy, not the client, decides whether requests share an envelope.
 type ClientRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	CohortId uint32                 `protobuf:"varint,2,opt,name=cohort_id,json=cohortId,proto3" json:"cohort_id,omitempty"`
-	Ordinal  uint32                 `protobuf:"varint,3,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
-	Uid      int64                  `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
-	Payload  []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
-	// t_cohort_seal is the barrier release instant, carried at A=off because the
-	// load generator owns the seal there and the proxy records it on the client's
-	// behalf (ADR-0001).
-	TCohortSeal   *int64 `protobuf:"varint,6,opt,name=t_cohort_seal,json=tCohortSeal,proto3,oneof" json:"t_cohort_seal,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	CohortId      uint32                 `protobuf:"varint,2,opt,name=cohort_id,json=cohortId,proto3" json:"cohort_id,omitempty"`
+	Ordinal       uint32                 `protobuf:"varint,3,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
+	Uid           int64                  `protobuf:"varint,4,opt,name=uid,proto3" json:"uid,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,5,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -703,13 +704,6 @@ func (x *ClientRequest) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
-}
-
-func (x *ClientRequest) GetTCohortSeal() int64 {
-	if x != nil && x.TCohortSeal != nil {
-		return *x.TCohortSeal
-	}
-	return 0
 }
 
 // ClientResponse is one logical request's result as the client sees it.
@@ -863,15 +857,13 @@ const file_api_envelope_v1_envelope_proto_rawDesc = "" +
 	"\aresults\x18\x05 \x03(\v2#.batch2go.envelope.v1.LogicalResultR\aresults\x12A\n" +
 	"\bevidence\x18\x06 \x01(\v2%.batch2go.envelope.v1.AdapterEvidenceR\bevidence\x12$\n" +
 	"\x0et_adapter_recv\x18\a \x01(\x03R\ftAdapterRecv\x12$\n" +
-	"\x0et_adapter_send\x18\b \x01(\x03R\ftAdapterSend\"\xc4\x01\n" +
+	"\x0et_adapter_send\x18\b \x01(\x03R\ftAdapterSend\"\x9e\x01\n" +
 	"\rClientRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tcohort_id\x18\x02 \x01(\rR\bcohortId\x12\x18\n" +
 	"\aordinal\x18\x03 \x01(\rR\aordinal\x12\x10\n" +
 	"\x03uid\x18\x04 \x01(\x03R\x03uid\x12\x18\n" +
-	"\apayload\x18\x05 \x01(\fR\apayload\x12'\n" +
-	"\rt_cohort_seal\x18\x06 \x01(\x03H\x00R\vtCohortSeal\x88\x01\x01B\x10\n" +
-	"\x0e_t_cohort_seal\"\x85\x02\n" +
+	"\apayload\x18\x05 \x01(\fR\apayloadJ\x04\b\x06\x10\aR\rt_cohort_seal\"\x85\x02\n" +
 	"\x0eClientResponse\x12\x1b\n" +
 	"\tcohort_id\x18\x01 \x01(\rR\bcohortId\x12\x18\n" +
 	"\aordinal\x18\x02 \x01(\rR\aordinal\x124\n" +
@@ -938,7 +930,6 @@ func file_api_envelope_v1_envelope_proto_init() {
 		return
 	}
 	file_api_envelope_v1_envelope_proto_msgTypes[1].OneofWrappers = []any{}
-	file_api_envelope_v1_envelope_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

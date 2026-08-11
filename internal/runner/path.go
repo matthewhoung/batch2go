@@ -25,7 +25,7 @@ type pathResult struct {
 // selects between them, and cellPath is the only place that selection happens —
 // so a cell can never end up on the wrong one by accident.
 type path interface {
-	Send(ctx context.Context, member identity.LogicalRequest, seal int64) (pathResult, error)
+	Send(ctx context.Context, member identity.LogicalRequest) (pathResult, error)
 	LogicalBytes() int
 	Close() error
 }
@@ -72,7 +72,7 @@ func buildPayload(payloadFloats int) []byte {
 
 type directPath struct{ client *direct.Client }
 
-func (p *directPath) Send(ctx context.Context, member identity.LogicalRequest, _ int64) (pathResult, error) {
+func (p *directPath) Send(ctx context.Context, member identity.LogicalRequest) (pathResult, error) {
 	out, err := p.client.Send(ctx, member)
 	if err != nil {
 		return pathResult{}, err
@@ -85,11 +85,11 @@ func (p *directPath) Close() error      { return nil }
 
 type sharedPath struct{ client *shared.Client }
 
-// Send carries the barrier release instant with the request, because at A=off
-// the load generator owns t_cohort_seal and the proxy records the value rather
-// than minting one (ADR-0001).
-func (p *sharedPath) Send(ctx context.Context, member identity.LogicalRequest, seal int64) (pathResult, error) {
-	out, err := p.client.Send(ctx, member, seal)
+// Send carries no barrier release instant. The seal is a stage the load
+// generator owns and records at A=off, and the proxy mints its own at A=on
+// (ADR-0001); neither end reads one sent from here.
+func (p *sharedPath) Send(ctx context.Context, member identity.LogicalRequest) (pathResult, error) {
+	out, err := p.client.Send(ctx, member)
 	if err != nil {
 		return pathResult{}, err
 	}

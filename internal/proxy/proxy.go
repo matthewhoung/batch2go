@@ -62,8 +62,8 @@ func New(cfg Config, builder *envelope.Builder, backend envelopev1.BackendClient
 // Submit forwards one logical request and fans its response back.
 //
 // Nothing is collected, nothing is joined, and no seal is emitted: the load
-// generator owns t_cohort_seal at this factor level, and the proxy records the
-// value the client carried rather than minting one of its own.
+// generator owns t_cohort_seal at this factor level and records the barrier
+// release itself, so the seal never travels the wire (ADR-0001).
 func (s *Service) Submit(ctx context.Context, req *envelopev1.ClientRequest) (*envelopev1.ClientResponse, error) {
 	recvAt := s.now()
 

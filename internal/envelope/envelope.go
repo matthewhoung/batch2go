@@ -10,6 +10,8 @@ package envelope
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -76,8 +78,7 @@ func (b *Builder) Independent(member identity.LogicalRequest, payload []byte, se
 		Uid:      int64(member.UID()),
 		Payload:  payload,
 	}}
-	env.LogicalBytes = uint64(len(payload))
-	env.AuxiliaryBytes = uint64(len(payload))
+	accountBytes(env, uint64(len(payload)))
 	return env
 }
 
@@ -92,17 +93,20 @@ func (b *Builder) Aggregate(members []identity.LogicalRequest, payloads [][]byte
 		return nil, fmt.Errorf("envelope: an aggregate envelope carries at least one member")
 	}
 
+	cohort := members[0].Cohort
 	env := b.base()
-	env.CohortId = uint32(members[0].Cohort)
+	env.CohortId = uint32(cohort)
 	env.ExpectedMembers = uint32(len(members))
 	env.Aggregate = true
 	env.TProxySend = sentAt
 	env.TCohortSeal = &seal
 
+	var logical uint64
 	env.Requests = make([]*envelopev1.LogicalRequest, 0, len(members))
-	for i, m := range members {
-		if m.Cohort != members[0].Cohort {
-			return nil, fmt.Errorf("envelope: aggregate envelope mixes cohorts %d and %d", members[0].Cohort, m.Cohort)
+	for _, i := range canonicalOrder(members) {
+		m := members[i]
+		if m.Cohort != cohort {
+			return nil, fmt.Errorf("envelope: aggregate envelope mixes cohorts %d and %d", cohort, m.Cohort)
 		}
 		env.Requests = append(env.Requests, &envelopev1.LogicalRequest{
 			CohortId: uint32(m.Cohort),
@@ -110,10 +114,31 @@ func (b *Builder) Aggregate(members []identity.LogicalRequest, payloads [][]byte
 			Uid:      int64(m.UID()),
 			Payload:  payloads[i],
 		})
-		env.LogicalBytes += uint64(len(payloads[i]))
-		env.AuxiliaryBytes += uint64(len(payloads[i]))
+		logical += uint64(len(payloads[i]))
 	}
+	if err := checkCohortMembership(env.Requests, env.GetCohortId(), b.cfg.TargetB); err != nil {
+		return nil, err
+	}
+	accountBytes(env, logical)
 	return env, nil
+}
+
+// canonicalOrder is the permutation that puts a cohort's members in ordinal
+// order, whatever order they arrived in.
+//
+// Order is part of the contract because the adapter fans a dispatch out in the
+// order the envelope lists. Left as arrival order, dispatch skew would measure
+// which member reached the proxy first rather than what it costs to release a
+// cohort — and at A=on that skew is the quantity the fan-out is judged by.
+func canonicalOrder(members []identity.LogicalRequest) []int {
+	order := make([]int, len(members))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return members[order[i]].Ordinal < members[order[j]].Ordinal
+	})
+	return order
 }
 
 func (b *Builder) base() *envelopev1.RequestEnvelope {
@@ -204,7 +229,92 @@ func Validate(env *envelopev1.RequestEnvelope, exp Expectation) error {
 			return fmt.Errorf("envelope: member %v carries no payload; the declared padding must traverse every hop", req)
 		}
 	}
+
+	if env.GetAggregate() {
+		if err := checkCohortMembership(members, env.GetCohortId(), exp.TargetB); err != nil {
+			return err
+		}
+	}
+	return checkCanonicalOrder(members)
+}
+
+// checkCohortMembership requires an envelope to carry each of its cohort's B
+// ordinals exactly once.
+//
+// Counting members is not membership. Four copies of one ordinal is four
+// members, and an envelope that dropped one member and repeated another would
+// pass a count check — then execute as a batch of B whose attested membership
+// names requests that were never released. The message names every fault it
+// found rather than the first, because an envelope this wrong is a bug being
+// diagnosed, not a condition being handled.
+func checkCohortMembership(members []*envelopev1.LogicalRequest, cohort uint32, targetB int) error {
+	seen := make([]int, targetB)
+	var strays []identity.Ordinal
+	for _, m := range members {
+		ord := identity.Ordinal(m.GetOrdinal())
+		if int(ord) >= targetB {
+			strays = append(strays, ord)
+			continue
+		}
+		seen[ord]++
+	}
+
+	var repeated, missing []identity.Ordinal
+	for ord, n := range seen {
+		switch {
+		case n == 0:
+			missing = append(missing, identity.Ordinal(ord))
+		case n > 1:
+			repeated = append(repeated, identity.Ordinal(ord))
+		}
+	}
+
+	var faults []string
+	if len(repeated) > 0 {
+		faults = append(faults, fmt.Sprintf("ordinals %v appear more than once", repeated))
+	}
+	if len(missing) > 0 {
+		faults = append(faults, fmt.Sprintf("ordinals %v are missing", missing))
+	}
+	if len(strays) > 0 {
+		faults = append(faults, fmt.Sprintf("ordinals %v are outside [0,%d)", strays, targetB))
+	}
+	if len(faults) == 0 {
+		return nil
+	}
+	return fmt.Errorf("envelope: cohort %d is not a cohort of %d: %s", cohort, targetB, strings.Join(faults, "; "))
+}
+
+// checkCanonicalOrder requires members to travel in ascending ordinal order, so
+// that the adapter's fan-out order is the cohort's own order and not the order
+// its members happened to reach the proxy.
+func checkCanonicalOrder(members []*envelopev1.LogicalRequest) error {
+	for i := 1; i < len(members); i++ {
+		if prev, ord := members[i-1].GetOrdinal(), members[i].GetOrdinal(); ord <= prev {
+			return fmt.Errorf("envelope: members are not in canonical order: ordinal %d follows %d", ord, prev)
+		}
+	}
 	return nil
+}
+
+// accountBytes fills the envelope's two byte counters so that they partition its
+// marshaled size exactly: logical_bytes is the payload the experiment asked to
+// move, auxiliary_bytes everything the protocol added to move it.
+//
+// The overhead is measured rather than estimated, which makes the counter part
+// of the message it measures: writing it grows the size it reports. Each pass
+// re-measures and rewrites, and the loop terminates because the value only ever
+// grows and only grows when its varint gains a byte — of at most ten.
+func accountBytes(env *envelopev1.RequestEnvelope, logical uint64) {
+	env.LogicalBytes = logical
+	env.AuxiliaryBytes = 0
+	for {
+		auxiliary := uint64(proto.Size(env)) - logical
+		if auxiliary == env.AuxiliaryBytes {
+			return
+		}
+		env.AuxiliaryBytes = auxiliary
+	}
 }
 
 // Members extracts the logical request identities an envelope carries.

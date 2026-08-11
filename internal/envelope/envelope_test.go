@@ -203,6 +203,229 @@ func TestAggregateEnvelopeCarriesTheWholeCohortAndItsSeal(t *testing.T) {
 	}
 }
 
+// f10Builder builds aggregate envelopes for a cohort of four.
+func f10Builder(t *testing.T) (*Builder, Expectation) {
+	t.Helper()
+	cfg := f00Config()
+	cfg.Cell = identity.CellF10
+	b, err := NewBuilder(cfg)
+	if err != nil {
+		t.Fatalf("new builder: %v", err)
+	}
+	exp := f00Expectation()
+	exp.Cell = identity.CellF10
+	return b, exp
+}
+
+// cohortOf returns the members and payloads of a whole cohort, each payload
+// distinguishable so that a member and its payload can be checked to have
+// travelled together.
+func cohortOf(cohort identity.CohortID, ordinals ...identity.Ordinal) ([]identity.LogicalRequest, [][]byte) {
+	members := make([]identity.LogicalRequest, 0, len(ordinals))
+	payloads := make([][]byte, 0, len(ordinals))
+	for _, o := range ordinals {
+		members = append(members, identity.LogicalRequest{Cohort: cohort, Ordinal: o})
+		payloads = append(payloads, []byte{byte(o), 0xAA})
+	}
+	return members, payloads
+}
+
+// Counting members is not membership. Four copies of one ordinal is four
+// members, and an envelope that lost one member and duplicated another would
+// pass a count check, then execute as a batch of B whose membership evidence
+// names the wrong requests.
+func TestAggregateEnvelopeMustCarryEachOrdinalExactlyOnce(t *testing.T) {
+	b, _ := f10Builder(t)
+
+	cases := map[string]struct {
+		ordinals []identity.Ordinal
+		want     string
+	}{
+		"a duplicated ordinal":          {[]identity.Ordinal{0, 1, 1, 3}, "more than once"},
+		"every member the same":         {[]identity.Ordinal{2, 2, 2, 2}, "more than once"},
+		"a missing ordinal":             {[]identity.Ordinal{0, 1, 2, 2}, "missing"},
+		"an ordinal outside the cohort": {[]identity.Ordinal{0, 1, 2, 9}, "outside"},
+		"a short cohort":                {[]identity.Ordinal{0, 1, 2}, "missing"},
+	}
+
+	for name, tc := range cases {
+		members, payloads := cohortOf(3, tc.ordinals...)
+		_, err := b.Aggregate(members, payloads, 900, 1000)
+		if err == nil {
+			t.Errorf("%s: should have been refused", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q should say %q", name, err, tc.want)
+		}
+	}
+}
+
+// The adapter is the other side of the same invariant: an envelope built
+// elsewhere, or damaged in flight, must not validate as a cohort it does not
+// carry.
+func TestValidateRefusesAnEnvelopeThatIsNotItsCohort(t *testing.T) {
+	b, exp := f10Builder(t)
+	members, payloads := cohortOf(3, 0, 1, 2, 3)
+
+	t.Run("duplicate", func(t *testing.T) {
+		env, err := b.Aggregate(members, payloads, 900, 1000)
+		if err != nil {
+			t.Fatalf("aggregate: %v", err)
+		}
+		env.Requests[3] = env.Requests[0]
+
+		err = Validate(env, exp)
+		if err == nil {
+			t.Fatal("an envelope carrying one ordinal twice is not a cohort of four")
+		}
+		if !strings.Contains(err.Error(), "more than once") {
+			t.Errorf("the error should name the duplication, got: %v", err)
+		}
+	})
+
+	t.Run("gap", func(t *testing.T) {
+		env, err := b.Aggregate(members, payloads, 900, 1000)
+		if err != nil {
+			t.Fatalf("aggregate: %v", err)
+		}
+		stray := identity.LogicalRequest{Cohort: 3, Ordinal: 9}
+		env.Requests[3] = &envelopev1.LogicalRequest{
+			CohortId: uint32(stray.Cohort),
+			Ordinal:  uint32(stray.Ordinal),
+			Uid:      int64(stray.UID()),
+			Payload:  []byte("p"),
+		}
+
+		err = Validate(env, exp)
+		if err == nil {
+			t.Fatal("an envelope missing an ordinal of its cohort must be refused")
+		}
+		if !strings.Contains(err.Error(), "missing") || !strings.Contains(err.Error(), "outside") {
+			t.Errorf("the error should name both the gap and the stray ordinal, got: %v", err)
+		}
+	})
+}
+
+// Members travel in ordinal order whatever order they arrived in. The adapter
+// fans a dispatch out in the order the envelope lists, so arrival order would
+// otherwise leak into dispatch skew — a measurement of the proxy's intake rather
+// than of the cost of releasing a cohort.
+func TestAggregateMembersTravelInCanonicalOrder(t *testing.T) {
+	b, exp := f10Builder(t)
+	members, payloads := cohortOf(3, 2, 0, 3, 1)
+
+	env, err := b.Aggregate(members, payloads, 900, 1000)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if err := Validate(env, exp); err != nil {
+		t.Fatalf("a freshly built aggregate envelope should validate: %v", err)
+	}
+
+	carried := Members(env)
+	for i, m := range env.GetRequests() {
+		if got := identity.Ordinal(m.GetOrdinal()); int(got) != i {
+			t.Errorf("member %d carries ordinal %d, canonical order puts %d there", i, got, i)
+		}
+		// A payload must follow its own member through the reordering.
+		if want := byte(i); len(m.GetPayload()) == 0 || m.GetPayload()[0] != want {
+			t.Errorf("member %d carries payload %v, want the one built for ordinal %d", i, m.GetPayload(), i)
+		}
+		if got := identity.UID(m.GetUid()); got != carried[i].UID() {
+			t.Errorf("member %d carries uid %d, its identity encodes %d", i, got, carried[i].UID())
+		}
+	}
+}
+
+// An envelope whose members arrived out of order is refused rather than
+// dispatched in that order.
+func TestValidateRefusesMembersOutOfCanonicalOrder(t *testing.T) {
+	b, exp := f10Builder(t)
+	members, payloads := cohortOf(3, 0, 1, 2, 3)
+
+	env, err := b.Aggregate(members, payloads, 900, 1000)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	env.Requests[0], env.Requests[3] = env.Requests[3], env.Requests[0]
+
+	err = Validate(env, exp)
+	if err == nil {
+		t.Fatal("members out of canonical order must be refused")
+	}
+	if !strings.Contains(err.Error(), "order") {
+		t.Errorf("the error should name the ordering, got: %v", err)
+	}
+}
+
+// The two byte counters partition the marshaled size: logical_bytes is what the
+// experiment asked to move, auxiliary_bytes is what the protocol added to move
+// it. The second is the per-envelope cost Factor A changes — paid B times at
+// A=off and once at A=on — so it is measured against the real marshaled size
+// rather than estimated, and it is emphatically not a copy of the first.
+func TestByteAccountingPartitionsTheMarshaledSize(t *testing.T) {
+	b, _ := f10Builder(t)
+
+	for _, payloadBytes := range []int{1, 100, 4096, 1 << 16, 1 << 20} {
+		members, _ := cohortOf(5, 0, 1, 2, 3)
+		payloads := make([][]byte, len(members))
+		for i := range payloads {
+			payloads[i] = make([]byte, payloadBytes)
+		}
+
+		env, err := b.Aggregate(members, payloads, 900, 1000)
+		if err != nil {
+			t.Fatalf("aggregate: %v", err)
+		}
+		checkByteAccounting(t, env, uint64(len(members)*payloadBytes))
+
+		single := b.Independent(members[0], payloads[0], 1000)
+		checkByteAccounting(t, single, uint64(payloadBytes))
+	}
+}
+
+func checkByteAccounting(t *testing.T, env *envelopev1.RequestEnvelope, wantLogical uint64) {
+	t.Helper()
+	if got := env.GetLogicalBytes(); got != wantLogical {
+		t.Errorf("logical_bytes = %d, the payloads are %d bytes", got, wantLogical)
+	}
+	if got, want := env.GetLogicalBytes()+env.GetAuxiliaryBytes(), uint64(WireBytes(env)); got != want {
+		t.Errorf("logical_bytes + auxiliary_bytes = %d, the envelope marshals to %d", got, want)
+	}
+	if env.GetAuxiliaryBytes() == 0 {
+		t.Error("auxiliary_bytes is zero; an envelope always costs some framing")
+	}
+	if env.GetAuxiliaryBytes() >= wantLogical && wantLogical > 4096 {
+		t.Errorf("auxiliary_bytes = %d for %d payload bytes; it is measuring the payload, not the framing",
+			env.GetAuxiliaryBytes(), wantLogical)
+	}
+}
+
+// The client's cohort seal was removed at v1: the load generator owns the seal
+// at A=off and records it itself, and at A=on the proxy mints its own. The tag
+// stays reserved so it cannot be quietly reused for a different meaning while
+// the protocol version stays 1.
+func TestClientRequestReservesTheCohortSealTag(t *testing.T) {
+	const sealTag = 6
+
+	d := (&envelopev1.ClientRequest{}).ProtoReflect().Descriptor()
+	if f := d.Fields().ByNumber(sealTag); f != nil {
+		t.Fatalf("tag %d carries field %q; the client carries no cohort seal", sealTag, f.Name())
+	}
+	if f := d.Fields().ByName("t_cohort_seal"); f != nil {
+		t.Errorf("the client request still carries %q", f.Name())
+	}
+
+	ranges := d.ReservedRanges()
+	for i := 0; i < ranges.Len(); i++ {
+		if r := ranges.Get(i); r[0] <= sealTag && sealTag < r[1] {
+			return
+		}
+	}
+	t.Errorf("tag %d is not reserved; it could be reused for a different meaning at v1", sealTag)
+}
+
 func TestMembersRoundTripThroughTheEnvelope(t *testing.T) {
 	b := newTestBuilder(t)
 	want := identity.LogicalRequest{Cohort: 12, Ordinal: 3}

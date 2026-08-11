@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/matthewhoung/batch2go/internal/envelope"
 	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/events/clockdomain"
 	"github.com/matthewhoung/batch2go/internal/identity"
@@ -20,7 +21,13 @@ import (
 )
 
 // BundleSchemaVersion is the run-bundle format version.
-const BundleSchemaVersion = 1
+//
+// It became 2 when the bundle started naming the envelope protocol that carried
+// its payloads. A bundle written before that decodes the new field as zero,
+// which is indistinguishable from a real answer — so the version moves and
+// LoadBundle refuses the older shape rather than reading a contract number out
+// of a field nobody wrote.
+const BundleSchemaVersion = 2
 
 // Terminal run states.
 const (
@@ -55,8 +62,13 @@ type Bundle struct {
 	// records are numbers of unknown provenance.
 	ClockDomain *clockdomain.Domain `json:"clock_domain"`
 
-	// EventSchemaVersion is the record vocabulary the streams were written with.
-	EventSchemaVersion int `json:"event_schema_version"`
+	// EventSchemaVersion is the record vocabulary the streams were written with,
+	// and EnvelopeSchemaVersion the transport contract that carried the payloads.
+	// Both belong in the archive for the same reason: a run's records are only
+	// interpretable against the contracts that produced them, and those contracts
+	// change between slices while archived runs do not.
+	EventSchemaVersion    int `json:"event_schema_version"`
+	EnvelopeSchemaVersion int `json:"envelope_schema_version"`
 
 	Server        ServerRecord         `json:"server"`
 	ModelEntry    modelrepo.Entry      `json:"model_entry"`
@@ -151,6 +163,7 @@ func (l Layout) StreamPath(emitter identity.Emitter) string {
 func WriteBundle(l Layout, b *Bundle) error {
 	b.SchemaVersion = BundleSchemaVersion
 	b.EventSchemaVersion = events.SchemaVersion
+	b.EnvelopeSchemaVersion = envelope.SchemaVersion
 
 	if err := writeJSON(l.Manifest, b.Manifest); err != nil {
 		return err

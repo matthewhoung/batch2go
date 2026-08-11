@@ -535,7 +535,7 @@ func releaseCohort(
 			defer cancel()
 
 			rec.SetStage(events.StageClientSend, clock.Now())
-			result, err := client.Send(reqCtx, member, seal)
+			result, err := client.Send(reqCtx, member)
 			rec.SetStage(events.StageClientRecv, clock.Now())
 
 			status := events.StatusOK

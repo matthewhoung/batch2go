@@ -78,18 +78,19 @@ func (c *Client) LogicalBytes() int { return len(c.payload) }
 
 // Send submits one logical request through the proxy.
 //
-// seal is the barrier release instant, carried because the load generator owns
-// t_cohort_seal at A=off (ADR-0001). The client sends one request at a time
-// whatever the cell's factor level: whether requests share an envelope is the
-// proxy's decision, not the client's.
-func (c *Client) Send(ctx context.Context, member identity.LogicalRequest, seal int64) (Result, error) {
+// It carries no cohort seal. At A=off the load generator owns t_cohort_seal and
+// records the barrier release itself, and at A=on the proxy mints its own when
+// it seals the envelope, so a seal on the wire here would be a stage nobody
+// reads (ADR-0001). The client sends one request at a time whatever the cell's
+// factor level: whether requests share an envelope is the proxy's decision, not
+// the client's.
+func (c *Client) Send(ctx context.Context, member identity.LogicalRequest) (Result, error) {
 	resp, err := c.proxy.Submit(ctx, &envelopev1.ClientRequest{
-		RunId:       string(c.run),
-		CohortId:    uint32(member.Cohort),
-		Ordinal:     uint32(member.Ordinal),
-		Uid:         int64(member.UID()),
-		Payload:     c.payload,
-		TCohortSeal: &seal,
+		RunId:    string(c.run),
+		CohortId: uint32(member.Cohort),
+		Ordinal:  uint32(member.Ordinal),
+		Uid:      int64(member.UID()),
+		Payload:  c.payload,
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("client/shared: submit %v: %w", member, err)
