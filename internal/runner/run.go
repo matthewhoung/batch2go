@@ -308,7 +308,21 @@ func execute(
 	// The shared path's proxy and adapter are separate processes; they must be up
 	// before the first request and stopped before the streams are read, because
 	// each flushes its event stream on shutdown.
-	svc, err := startServices(ctx, m, clock, layout, entry, bundle.ModelGraph, opts)
+	//
+	// A service that exits before the run is over cancels this context. Without
+	// that, every request in flight would wait out its own deadline against a
+	// process that is gone, and the run would report the last of those timeouts
+	// as its cause instead of the death that produced them all.
+	interrupted := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	svc, err := startServices(ctx, m, clock, layout, entry, bundle.ModelGraph, opts, serviceHooks{
+		onDeath: cancel,
+		// Read from the context above this one's cancellation, so that a service
+		// obeying the operator's interrupt is not mistaken for one that died.
+		interrupted: func() bool { return interrupted.Err() != nil },
+	})
 	if err != nil {
 		return err
 	}
@@ -352,7 +366,7 @@ func execute(
 	for i := 0; i < m.Cohort.WarmupCount; i++ {
 		cohort := workload.NewCohort(identity.CohortID(i), m.Cohort.Size, true)
 		if _, err := releaseCohort(ctx, m, clock, client, &cohort, nil); err != nil {
-			return fmt.Errorf("runner: warm-up cohort %d: %w", i, err)
+			return fmt.Errorf("runner: warm-up cohort %d: %w", i, svc.explain(err))
 		}
 	}
 	opts.Logf("warm-up complete: %d cohorts", m.Cohort.WarmupCount)
@@ -373,7 +387,7 @@ func execute(
 		cohort := workload.NewCohort(identity.CohortID(m.Cohort.WarmupCount+i), m.Cohort.Size, false)
 		outcomes, err := releaseCohort(ctx, m, clock, client, &cohort, loadgen)
 		if err != nil {
-			return err
+			return svc.explain(err)
 		}
 		for req, out := range outcomes {
 			results[req] = out
@@ -383,7 +397,7 @@ func execute(
 		if gap := m.InterCohortGap(); gap > 0 && i < m.Cohort.Count-1 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return svc.explain(ctx.Err())
 			case <-time.After(gap):
 			}
 		}

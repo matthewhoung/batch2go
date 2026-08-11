@@ -40,7 +40,7 @@ const (
 // can disagree — and a disagreement shows up as a run that parsed, materialized
 // a model repository, started a data plane, and only then discovered that the
 // cell it was asked for does not exist here.
-var implementedCells = map[Cell]bool{CellD0: true, CellF00: true}
+var implementedCells = map[Cell]bool{CellD0: true, CellF00: true, CellF10: true}
 
 // AllCells lists every cell the design defines, in contract-table order.
 func AllCells() []Cell {

@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "description": "Spec 0002: F10 on the local validation environment. A=on, V=off — one envelope carries the whole cohort, and the adapter fans it out to B concurrent single-item backend requests against the same unbatched entry F00 uses. The proxy holds a cohort while it assembles, so formation is a measured stage here and structurally absent at A=off (ADR-0010).",
+
+  "experiment_id": "exp-0001-walking-skeleton",
+  "session_id": "sess-envv-0001",
+  "run_id": "run-f10-envv-b4",
+  "cell": "F10",
+  "environment": "envV",
+
+  "cohort": {
+    "size": 4,
+    "count": 25,
+    "warmup_count": 3,
+    "formation_deadline_millis": 5000
+  },
+
+  "model": {
+    "catalog": "artifacts/catalog.json",
+    "artifact_dir": "artifacts/generated",
+    "runtime_dir": "results/runtime-models",
+    "artifact_id": "synthetic_k8_p65536",
+    "entry": "unbatched",
+    "expected_digest": "sha256:87a859763e0236fc0c677e5e311b3661b947aabb36db301674df696b8ded12dd"
+  },
+
+  "workload": {
+    "seed": 20260811,
+    "release_mode": "fixed-cohort",
+    "inter_cohort_gap_millis": 20,
+    "request_timeout_millis": 30000
+  },
+
+  "transport": {
+    "triton_endpoint": "127.0.0.1:8001",
+    "proxy_endpoint": "127.0.0.1:9100",
+    "adapter_endpoint": "127.0.0.1:9101",
+    "max_message_bytes": 268435456,
+    "initial_window_size": 4194304,
+    "initial_conn_window_size": 16777216
+  },
+
+  "gc": {
+    "gogc": 100,
+    "gomemlimit_bytes": 2147483648,
+    "sample_millis": 20
+  },
+
+  "tracing": {
+    "mode": "timestamps",
+    "trace_dir": "results/triton-traces"
+  },
+
+  "output": {
+    "bundle_dir": "results/bundles"
+  },
+
+  "expected_evidence": {
+    "executions": 100,
+    "executions_per_cohort": 4,
+    "batch_size": 1,
+    "max_adapter_dispatch_wait_nanos": 1000000,
+    "max_dispatch_skew_nanos": 250000
+  },
+
+  "conservation": {
+    "tolerance_fraction": 0.05
+  }
+}

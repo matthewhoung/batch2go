@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -43,6 +44,12 @@ func run() error {
 	cell := flag.String("cell", "", "cell being served")
 	clockDomainID := flag.String("clock-domain", "", "clock domain the run declared")
 	targetB := flag.Int("target-b", 0, "cohort size the run declared")
+
+	// No default: at A=on this bounds how long a cohort is held before it is
+	// failed whole, which is an experimental quantity the manifest declares. A
+	// zero here is refused by proxy.Config for an A=on cell rather than standing
+	// in for a number nobody wrote down (ADR-0010).
+	formationDeadlineMillis := flag.Int("formation-deadline-millis", 0, "how long the proxy may hold a partly assembled cohort (A=on only)")
 
 	maxMessageBytes := flag.Int("max-message-bytes", 256<<20, "gRPC message ceiling")
 	initialWindow := flag.Int("initial-window-size", 4<<20, "gRPC stream flow-control window")
@@ -106,9 +113,10 @@ func run() error {
 	defer writer.Close()
 
 	service, err := proxy.New(proxy.Config{
-		Cell:    parsedCell,
-		Run:     identity.RunID(*runID),
-		TargetB: *targetB,
+		Cell:              parsedCell,
+		Run:               identity.RunID(*runID),
+		TargetB:           *targetB,
+		FormationDeadline: time.Duration(*formationDeadlineMillis) * time.Millisecond,
 	}, builder, envelopev1.NewBackendClient(conn), writer, clock.Now)
 	if err != nil {
 		return err

@@ -56,6 +56,23 @@ type Cohort struct {
 	// WarmupCount is released before recording begins. Warm-up requests traverse
 	// the same path but produce no evidence.
 	WarmupCount int `json:"warmup_count"`
+
+	// FormationDeadlineMillis bounds how long the proxy holds a partly assembled
+	// cohort before failing it whole. It exists only where the proxy aggregates:
+	// at A=on a cohort is a runtime object the proxy holds, and at A=off nothing
+	// is assembled, so naming a deadline there would declare a stage the run does
+	// not have (ADR-0010).
+	//
+	// The deadline runs from the first member's arrival at the proxy — that is
+	// when formation begins, and measuring from the scheduled release would fold
+	// the first hop's transfer into a bound meant to constrain assembly, so the
+	// bound would drift with payload size.
+	FormationDeadlineMillis int `json:"formation_deadline_millis,omitempty"`
+}
+
+// FormationDeadline is how long the proxy may hold a partly assembled cohort.
+func (c Cohort) FormationDeadline() time.Duration {
+	return time.Duration(c.FormationDeadlineMillis) * time.Millisecond
 }
 
 // Model names the artifact and the entry to serve it from.
@@ -140,6 +157,15 @@ type ExpectedEvidence struct {
 	// waiting; the validator also checks the shape of the release, which is what
 	// actually distinguishes forwarding from joining (ADR-0001).
 	MaxAdapterDispatchWaitNanos int64 `json:"max_adapter_dispatch_wait_nanos,omitempty"`
+
+	// MaxDispatchSkewNanos bounds first-to-last submit within one fan-out. It is
+	// required wherever the adapter releases more than one member at once, which
+	// is every A=on cell: a fan-out that submitted its members one after another
+	// would produce the same execution count, the same batch-size histogram and
+	// the same attested membership as a correct one, and only the skew betrays
+	// it. It is declared well below one execution's service time, because the
+	// claim it stands for is that the members reached the backend together.
+	MaxDispatchSkewNanos int64 `json:"max_dispatch_skew_nanos,omitempty"`
 }
 
 // Conservation fixes the tolerance the residual is judged against.
@@ -248,8 +274,28 @@ func (m *Manifest) Validate() error {
 	default:
 		return fmt.Errorf("unknown release mode %q", m.Workload.ReleaseMode)
 	}
+	// Formation exists exactly where the proxy aggregates (ADR-0010). Both
+	// directions are refused: a deadline where nothing is assembled would declare
+	// a stage the run does not have.
+	switch {
+	case cell.AggregatesEnvelopes() && m.Cohort.FormationDeadlineMillis <= 0:
+		return fmt.Errorf("cell %s aggregates envelopes, so its proxy holds a cohort while it assembles; it must declare cohort.formation_deadline_millis", cell)
+	case !cell.AggregatesEnvelopes() && m.Cohort.FormationDeadlineMillis != 0:
+		return fmt.Errorf("cell %s forms no cohort at the proxy and must not declare cohort.formation_deadline_millis", cell)
+	}
+
 	if m.Workload.RequestTimeoutMillis <= 0 {
 		return fmt.Errorf("workload.request_timeout_millis must be positive; a request without a deadline can vanish from the record")
+	}
+	// The formation deadline shares a context with the client's request deadline,
+	// so it has to fire first. Otherwise the client cancels, the held members'
+	// contexts die, and the cohort is torn down by cancellation through a path
+	// that has no name — leaving the formation-failure diagnosis unreachable
+	// (ADR-0010).
+	if cell.AggregatesEnvelopes() && m.Cohort.FormationDeadlineMillis >= m.Workload.RequestTimeoutMillis {
+		return fmt.Errorf(
+			"cohort.formation_deadline_millis %d must be strictly shorter than workload.request_timeout_millis %d, or the client cancels the cohort before the proxy can fail it by name",
+			m.Cohort.FormationDeadlineMillis, m.Workload.RequestTimeoutMillis)
 	}
 
 	switch m.Model.Entry {
@@ -295,6 +341,12 @@ func (m *Manifest) validateExpectedEvidence(cell identity.Cell) error {
 	if e.Executions != m.Cohort.Count*e.ExecutionsPerCohort {
 		return fmt.Errorf("expected_evidence.executions %d does not equal %d cohorts times %d executions each",
 			e.Executions, m.Cohort.Count, e.ExecutionsPerCohort)
+	}
+	// Every A=on cell releases B members in one dispatch, whatever Factor V says
+	// about how they execute, so the bound on how far apart those submissions may
+	// be is required at both V levels.
+	if cell.AggregatesEnvelopes() && e.MaxDispatchSkewNanos <= 0 {
+		return fmt.Errorf("cell %s releases its cohort in one fan-out and must declare expected_evidence.max_dispatch_skew_nanos", cell)
 	}
 	if cell.VectorizesCompute() {
 		if e.ExecutionsPerCohort != 1 {

@@ -52,8 +52,37 @@ func validF00() Manifest {
 	return m
 }
 
+// validF10 is the A=on manifest. Its proxy holds a cohort while it assembles,
+// so it declares a formation deadline, and its adapter releases B members in one
+// fan-out, so it declares how far apart those submissions may be.
+func validF10() Manifest {
+	m := validF00()
+	m.Cell = identity.CellF10
+	m.Run = "run-f10-test"
+	m.Cohort.FormationDeadlineMillis = 5_000
+	m.ExpectedEvidence.MaxDispatchSkewNanos = 250_000
+	return m
+}
+
+// validFor returns a manifest shaped for the cell, so a sweep over the design
+// fails an unimplemented cell for being unimplemented rather than for carrying
+// the wrong shape.
+func validFor(cell identity.Cell) Manifest {
+	var m Manifest
+	switch {
+	case !cell.UsesProxy():
+		m = validD0()
+	case cell.AggregatesEnvelopes():
+		m = validF10()
+	default:
+		m = validF00()
+	}
+	m.Cell = cell
+	return m
+}
+
 func TestValidManifestsPass(t *testing.T) {
-	for name, m := range map[string]Manifest{"D0": validD0(), "F00": validF00()} {
+	for name, m := range map[string]Manifest{"D0": validD0(), "F00": validF00(), "F10": validF10()} {
 		if err := m.Validate(); err != nil {
 			t.Errorf("%s manifest should validate: %v", name, err)
 		}
@@ -133,11 +162,7 @@ func TestPathEndpointsMustMatchTheCellTopology(t *testing.T) {
 // a model repository had been materialized.
 func TestUnimplementedCellsAreRefused(t *testing.T) {
 	for _, cell := range identity.AllCells() {
-		if cell == identity.CellD0 {
-			continue // the direct path has its own manifest shape, tested above
-		}
-		m := validF00()
-		m.Cell = cell
+		m := validFor(cell)
 
 		err := m.Validate()
 		switch {
@@ -147,6 +172,108 @@ func TestUnimplementedCellsAreRefused(t *testing.T) {
 			t.Errorf("cell %s is not implemented and must be refused", cell)
 		case !cell.Implemented() && !strings.Contains(err.Error(), string(cell)):
 			t.Errorf("cell %s: refusal %q should name the cell", cell, err)
+		}
+	}
+}
+
+// Formation exists exactly where the proxy aggregates. Both directions are
+// refused: a deadline where nothing is assembled would declare a stage the run
+// does not have, and its absence where a cohort is held would leave the bound to
+// a code default nobody wrote down (ADR-0010).
+func TestFormationDeadlineExistsExactlyWhereTheProxyAggregates(t *testing.T) {
+	for _, cell := range identity.ImplementedCells() {
+		m := validFor(cell)
+
+		// Take the deadline away.
+		absent := m
+		absent.Cohort.FormationDeadlineMillis = 0
+		err := absent.Validate()
+		if cell.AggregatesEnvelopes() && err == nil {
+			t.Errorf("cell %s holds a cohort and must declare a formation deadline", cell)
+		}
+		if !cell.AggregatesEnvelopes() && err != nil {
+			t.Errorf("cell %s forms no cohort and needs no deadline: %v", cell, err)
+		}
+
+		// Give it one it should not have.
+		present := m
+		present.Cohort.FormationDeadlineMillis = 5_000
+		err = present.Validate()
+		if !cell.AggregatesEnvelopes() {
+			if err == nil {
+				t.Errorf("cell %s forms no cohort at the proxy and must not declare a formation deadline", cell)
+			} else if !strings.Contains(err.Error(), "formation_deadline_millis") {
+				t.Errorf("cell %s: refusal %q should name the parameter", cell, err)
+			}
+		}
+	}
+}
+
+// The formation deadline shares a context with the client's request deadline, so
+// it has to fire first. Otherwise the client cancels, the held members' contexts
+// die, and the cohort is torn down through a path that has no name — leaving the
+// formation-failure diagnosis unreachable (ADR-0010).
+func TestFormationDeadlineMustBeStrictlyShorterThanTheRequestDeadline(t *testing.T) {
+	for name, deadline := range map[string]int{
+		"equal to the request deadline": 30_000,
+		"longer than it":                30_001,
+	} {
+		m := validF10()
+		m.Cohort.FormationDeadlineMillis = deadline
+		m.Workload.RequestTimeoutMillis = 30_000
+
+		err := m.Validate()
+		if err == nil {
+			t.Errorf("%s: should have been refused", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "strictly shorter") {
+			t.Errorf("%s: refusal %q should say why the ordering matters", name, err)
+		}
+	}
+
+	m := validF10()
+	m.Cohort.FormationDeadlineMillis = 29_999
+	m.Workload.RequestTimeoutMillis = 30_000
+	if err := m.Validate(); err != nil {
+		t.Errorf("a deadline one millisecond shorter is strictly shorter: %v", err)
+	}
+}
+
+// A serial fan-out produces the same execution count, the same histogram and the
+// same attested membership as a correct one; only the skew betrays it. The bound
+// it is judged against is declared, not defaulted.
+func TestFanOutCellsMustDeclareTheDispatchSkewBound(t *testing.T) {
+	for _, cell := range identity.ImplementedCells() {
+		m := validFor(cell)
+		m.ExpectedEvidence.MaxDispatchSkewNanos = 0
+
+		err := m.Validate()
+		switch {
+		case cell.AggregatesEnvelopes() && err == nil:
+			t.Errorf("cell %s releases its cohort in one fan-out and must bound its skew", cell)
+		case cell.AggregatesEnvelopes() && !strings.Contains(err.Error(), "max_dispatch_skew_nanos"):
+			t.Errorf("cell %s: refusal %q should name the parameter", cell, err)
+		case !cell.AggregatesEnvelopes() && err != nil:
+			t.Errorf("cell %s releases one member per dispatch and has nothing to skew: %v", cell, err)
+		}
+	}
+}
+
+// F10 is V=off: a cohort produces B executions of shape [1,…], exactly as F00
+// does. Only the transport differs, and a manifest that said otherwise would be
+// declaring a different cell.
+func TestF10DeclaresTheSameExecutionShapeAsF00(t *testing.T) {
+	// Asserting the fixture's own literals back at itself would prove nothing —
+	// no change to Validate could fail it. What is asserted is the refusal.
+	for name, mutate := range map[string]func(*Manifest){
+		"a cohort as one execution": func(m *Manifest) { m.ExpectedEvidence.ExecutionsPerCohort = 1 },
+		"a batched execution":       func(m *Manifest) { m.ExpectedEvidence.BatchSize = m.Cohort.Size },
+	} {
+		bad := validF10()
+		mutate(&bad)
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%s: F10 is V=off and must refuse it", name)
 		}
 	}
 }

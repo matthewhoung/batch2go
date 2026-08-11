@@ -13,6 +13,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	envelopev1 "github.com/matthewhoung/batch2go/api/envelope/v1"
 	"github.com/matthewhoung/batch2go/internal/envelope"
@@ -28,6 +29,35 @@ type Config struct {
 	Cell    identity.Cell
 	Run     identity.RunID
 	TargetB int
+
+	// FormationDeadline bounds how long a partly assembled cohort is held before
+	// it is failed whole. It comes from the manifest and is never inferred: it is
+	// an experimental quantity, it is treatment-correlated in its consequences —
+	// a cohort that cannot form costs one request at A=off and B at A=on — and a
+	// code default would be a number nobody declared (ADR-0010).
+	FormationDeadline time.Duration
+}
+
+// Validate rejects a configuration the proxy could not serve honestly.
+func (c Config) Validate() error {
+	switch {
+	case c.Run == "":
+		return fmt.Errorf("proxy: config needs a run id")
+	case c.Cell == "":
+		return fmt.Errorf("proxy: config needs a cell")
+	case c.TargetB <= 0:
+		return fmt.Errorf("proxy: config needs a positive target B, got %d", c.TargetB)
+	}
+	// Formation exists exactly where the proxy aggregates. Both directions are
+	// refused, because a deadline at A=off would bound a wait that does not
+	// happen and its presence in the record would suggest one did.
+	switch {
+	case c.Cell.AggregatesEnvelopes() && c.FormationDeadline <= 0:
+		return fmt.Errorf("proxy: cell %s aggregates envelopes and needs a formation deadline", c.Cell)
+	case !c.Cell.AggregatesEnvelopes() && c.FormationDeadline != 0:
+		return fmt.Errorf("proxy: cell %s forms no cohort and must not carry a formation deadline, got %s", c.Cell, c.FormationDeadline)
+	}
+	return nil
 }
 
 // Service implements the client-facing proxy service.
@@ -52,6 +82,9 @@ func New(cfg Config, builder *envelope.Builder, backend envelopev1.BackendClient
 		return nil, fmt.Errorf("proxy: needs an event writer")
 	case now == nil:
 		return nil, fmt.Errorf("proxy: needs a clock reader")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	if cfg.Cell.AggregatesEnvelopes() {
 		return nil, fmt.Errorf("proxy: cell %s is A=on; envelope aggregation arrives in spec 0002", cfg.Cell)
