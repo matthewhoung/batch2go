@@ -375,3 +375,124 @@ func (b Bundle) WithOverlappingExecutions() Bundle {
 	}
 	return out
 }
+
+// The two ways F10 can be faked while satisfying every check the walking
+// skeleton owns. Both stay in the suite permanently: a proxy that sealed each
+// member separately and sent B envelopes produces n=B executions, J=B distinct
+// ones, every execution of shape [1,…], a clean coalescing histogram, correct
+// self-attested membership and a matching presence mask. Only cardinality and
+// agreement tell it apart from the real thing.
+
+// WithPerMemberEnvelopes gives every member of the first cohort its own envelope
+// id — B envelopes wearing an A=on label.
+func (b Bundle) WithPerMemberEnvelopes() Bundle {
+	out := b.Clone()
+	cohort := out.FirstRequest().Cohort
+
+	for i, d := range out.Records {
+		if d.Record.Cohort != cohort || d.Record.EnvelopeID == 0 {
+			continue
+		}
+		// Distinct per member and stable across that member's records, which is
+		// exactly what a proxy sending one envelope per request would produce.
+		out.Records[i].Record.EnvelopeID += identity.EnvelopeID(d.Record.Ordinal) * 1_000
+	}
+	return out
+}
+
+// WithPerMemberSeal gives every member of the first cohort its own seal instant,
+// which is what a proxy that sealed on arrival rather than on completeness would
+// write.
+func (b Bundle) WithPerMemberSeal() Bundle {
+	return b.withStaggeredEnvelopeStage(events.StageCohortSeal)
+}
+
+// WithDisagreeingEnvelopeStage staggers one envelope-granularity stage across a
+// cohort's members. The seal is the obvious fake; this is the rest of the set,
+// because a proxy could be sealing correctly and still be sending B envelopes.
+func (b Bundle) WithDisagreeingEnvelopeStage(stage events.Stage) Bundle {
+	return b.withStaggeredEnvelopeStage(stage)
+}
+
+func (b Bundle) withStaggeredEnvelopeStage(stage events.Stage) Bundle {
+	out := b.Clone()
+	cohort := out.FirstRequest().Cohort
+
+	for i, d := range out.Records {
+		if d.Record.Cohort != cohort {
+			continue
+		}
+		v, ok := d.Record.Stage(stage)
+		if !ok {
+			continue
+		}
+		rec := d.Record
+		rec.SetStage(stage, v+int64(d.Record.Ordinal))
+		out.Records[i].Record = rec
+	}
+	return out
+}
+
+// WithFailedFormation removes one member of the first cohort from the shared
+// path and stops the rest at the proxy, which is what a cohort that never
+// assembled leaves behind.
+//
+// The absent member keeps its load-generator records and its timeout, because
+// that is the status the generator gave a request that never got an answer; the
+// held members keep their arrival and an error, because they did not themselves
+// time out. That asymmetry is the entire diagnostic content of the failure
+// (ADR-0010), so a fixture that flattened it would be testing a check against
+// evidence that had already thrown away what the check is for.
+func (b Bundle) WithFailedFormation() Bundle {
+	out := b.Clone()
+	cohort := out.FirstRequest().Cohort
+	absent := identity.Ordinal(b.Spec.CohortSize - 1)
+
+	kept := make([]events.Decoded, 0, len(out.Records))
+	for _, d := range out.Records {
+		if d.Record.Cohort != cohort {
+			kept = append(kept, d)
+			continue
+		}
+
+		if d.Record.Emitter == identity.EmitterLoadGen {
+			rec := d.Record
+			if rec.Ordinal == absent {
+				rec.Status = events.StatusTimeout
+			} else {
+				rec.Status = events.StatusError
+			}
+			// Nothing came back, so the client completion never happened.
+			rec.Presence = rec.Presence.Without(events.StageClientRecv)
+			rec.TS[events.StageClientRecv] = 0
+			d.Record = rec
+			kept = append(kept, d)
+			continue
+		}
+
+		// The member that never arrived has no record anywhere past the client.
+		if rec := d.Record; rec.Ordinal == absent {
+			continue
+		}
+		// The held members reached the proxy and stopped there.
+		if d.Record.Emitter != identity.EmitterProxy {
+			continue
+		}
+		rec := d.Record
+		arrival, ok := rec.Stage(events.StageProxyRecv)
+		if !ok {
+			continue
+		}
+		rec.Presence = 0
+		rec.TS = [events.StageCount + 1]int64{}
+		rec.SetStage(events.StageProxyRecv, arrival)
+		rec.Status = events.StatusError
+		rec.EnvelopeID = 0
+		rec.SetMembership(nil)
+		rec.BatchSize = 0
+		d.Record = rec
+		kept = append(kept, d)
+	}
+	out.Records = kept
+	return out
+}

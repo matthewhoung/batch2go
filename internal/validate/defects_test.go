@@ -177,6 +177,8 @@ func TestEveryDefectFixtureFails(t *testing.T) {
 		t.Fatalf("plant: %v", err)
 	}
 
+	f10 := testkit.NewSpec(identity.CellF10).MustBuild()
+
 	fixtures := map[string]testkit.Bundle{
 		"missing_timestamp":  missing,
 		"unexpected_stage":   unexpected,
@@ -186,6 +188,13 @@ func TestEveryDefectFixtureFails(t *testing.T) {
 		"cross_clock_domain": crossDomain,
 		"dropped_records":    d0.WithDroppedRecords(1),
 		"missing_request":    d0.WithMissingRequest(),
+
+		// The counter-fixtures for Factor A. These stay here permanently: each is
+		// a run that satisfies every other assertion in the package while being
+		// F00's behaviour wearing F10's label.
+		"per_member_envelopes": f10.WithPerMemberEnvelopes(),
+		"per_member_seal":      f10.WithPerMemberSeal(),
+		"failed_formation":     f10.WithFailedFormation(),
 	}
 	for name, fixture := range fixtures {
 		if v := validate.Validate(fixture.Expectation, fixture.Records); v.Passed {
@@ -194,7 +203,7 @@ func TestEveryDefectFixtureFails(t *testing.T) {
 	}
 
 	// And the controls: without a planted fault, each cell validates green.
-	for _, control := range []testkit.Bundle{d0, f00, f01} {
+	for _, control := range []testkit.Bundle{d0, f00, f01, f10} {
 		if v := validate.Validate(control.Expectation, control.Records); !v.Passed {
 			t.Errorf("control fixture for %s failed: %v", control.Spec.Cell, v.Defects())
 		}
@@ -359,4 +368,161 @@ func TestStatusResolutionIsDeterministicRegardlessOfRecordOrder(t *testing.T) {
 	if len(a.StatusBySource) < 2 {
 		t.Errorf("only %d source statuses kept; each process's view must survive", len(a.StatusBySource))
 	}
+}
+
+// The Factor A manipulation check. Each of these fixtures satisfies every other
+// assertion in the package: n=B executions, J=B distinct, all of shape [1,…], a
+// clean histogram, correct attested membership, a matching presence mask. What
+// they do not satisfy is the claim that makes the cell F10 rather than F00.
+
+func TestPerMemberEnvelopesFailTheCardinality(t *testing.T) {
+	good := aggregateFixture()
+	if v := validate.Validate(good.Expectation, good.Records); !v.Passed {
+		t.Fatalf("the control must pass: %v", v.Defects())
+	}
+
+	faked := good.Clone().WithPerMemberEnvelopes()
+	v := validate.Validate(faked.Expectation, faked.Records)
+	if v.Passed {
+		t.Fatal("a cohort in B envelopes was accepted as one that travelled in one")
+	}
+	if !v.HasDefect(validate.DefectEnvelopeCardinality) {
+		t.Errorf("the cardinality was not named: %v", v.Defects())
+	}
+	// And the count itself is in the evidence, not only in the prose.
+	for _, c := range v.Aggregation.Cohorts {
+		if c.Cohort == faked.FirstRequest().Cohort && c.Envelopes != good.Spec.CohortSize {
+			t.Errorf("cohort %d reports %d envelopes, the fixture planted %d",
+				c.Cohort, c.Envelopes, good.Spec.CohortSize)
+		}
+	}
+}
+
+func TestPerMemberSealFailsTheAgreement(t *testing.T) {
+	good := aggregateFixture()
+	faked := good.Clone().WithPerMemberSeal()
+
+	v := validate.Validate(faked.Expectation, faked.Records)
+	if v.Passed {
+		t.Fatal("a cohort whose members each carried their own seal was accepted")
+	}
+	if !v.HasDefect(validate.DefectEnvelopeStageDisagreement) {
+		t.Errorf("the disagreement was not named: %v", v.Defects())
+	}
+}
+
+// The seal is the obvious fake, so every other envelope-granularity stage gets
+// its own case: a proxy could seal correctly and still be sending B envelopes,
+// and each of these is the stage that would give it away.
+func TestAnyDisagreeingEnvelopeStageFails(t *testing.T) {
+	for _, stage := range validate.EnvelopeStages().Stages() {
+		t.Run(stage.String(), func(t *testing.T) {
+			good := aggregateFixture()
+			faked := good.Clone().WithDisagreeingEnvelopeStage(stage)
+
+			v := validate.Validate(faked.Expectation, faked.Records)
+			if v.Passed {
+				t.Fatalf("a cohort reporting %d values of %s was accepted", good.Spec.CohortSize, stage)
+			}
+			if !v.HasDefect(validate.DefectEnvelopeStageDisagreement) {
+				t.Errorf("the disagreement in %s was not named: %v", stage, v.Defects())
+			}
+		})
+	}
+}
+
+// A cohort that never formed is named as that, once, and the symptoms it would
+// otherwise produce are displaced rather than added to. A diagnosis buried under
+// a dozen missing timestamps is a diagnosis nobody reads.
+func TestAFormationFailureIsNamedAndDisplacesItsOwnSymptoms(t *testing.T) {
+	good := aggregateFixture()
+	broken := good.Clone().WithFailedFormation()
+
+	v := validate.Validate(broken.Expectation, broken.Records)
+	if v.Passed {
+		t.Fatal("a run that lost a whole cohort was accepted")
+	}
+	if !v.HasDefect(validate.DefectFormationFailure) {
+		t.Fatalf("the formation failure was not named: %v", v.Defects())
+	}
+
+	// Named once, at cohort level, not once per member.
+	var named int
+	for _, d := range v.Defects() {
+		if d.Kind == validate.DefectFormationFailure {
+			named++
+		}
+	}
+	if named != 1 {
+		t.Errorf("the failure was named %d times; B members failing for one reason is one diagnosis", named)
+	}
+
+	// The evidence keeps the asymmetry that is the failure's whole content.
+	if len(v.Aggregation.FailedFormations) != 1 {
+		t.Fatalf("%d formation failures reported, want 1", len(v.Aggregation.FailedFormations))
+	}
+	f := v.Aggregation.FailedFormations[0]
+	if len(f.Held) != good.Spec.CohortSize-1 || len(f.Absent) != 1 {
+		t.Errorf("cohort %d: %d held and %d absent, want %d and 1",
+			f.Cohort, len(f.Held), len(f.Absent), good.Spec.CohortSize-1)
+	}
+
+	// Displaced, not added to: the lost cohort's missing timestamps are not
+	// reported on top of the cause that produced every one of them.
+	lost := broken.FirstRequest().Cohort
+	for _, d := range v.Defects() {
+		if d.Kind == validate.DefectMissingTimestamp && d.Request != nil && d.Request.Cohort == lost {
+			t.Errorf("cohort %d's missing timestamps are still reported beside the failure that caused them: %v", lost, d)
+			break
+		}
+	}
+}
+
+// The displacement must not become a way to lose a run. A cohort that failed is
+// still a failure, and the other cohorts are still judged.
+func TestDisplacementStillFailsTheRunAndStillJudgesTheRest(t *testing.T) {
+	good := aggregateFixture()
+	broken := good.Clone().WithFailedFormation()
+
+	// A second, unrelated fault must still be found. If displacement were quietly
+	// dropping the lost cohort's records from the run, the checks that read the
+	// run as a whole would go quiet with them.
+	broken = broken.WithCoalescedSingles()
+
+	v := validate.Validate(broken.Expectation, broken.Records)
+	if v.Passed {
+		t.Fatal("a run with a lost cohort and a coalesced execution passed")
+	}
+	if !v.HasDefect(validate.DefectFormationFailure) {
+		t.Errorf("the formation failure was displaced out of the verdict entirely: %v", v.Defects())
+	}
+	if !v.HasDefect(validate.DefectCoalescedSingles) {
+		t.Errorf("hiding the lost cohort also hid a fault that had nothing to do with it: %v", v.Defects())
+	}
+
+	// And the cohorts that did form are still judged on aggregation. Displacement
+	// removes one cohort from the checks it would only confuse, not the run.
+	if got, want := len(v.Aggregation.Cohorts), good.Spec.CohortCount-1; got != want {
+		t.Errorf("%d cohorts were judged for aggregation, want %d — the ones that formed are still evidence", got, want)
+	}
+}
+
+// At A=off there is nothing to prove: a cohort's members travel in their own
+// envelopes by construction, and asserting one envelope per cohort there would
+// fail every correct run of the baseline.
+func TestAggregationCheckDoesNotApplyAtAOff(t *testing.T) {
+	f00 := testkit.NewSpec(identity.CellF00).MustBuild()
+	v := validate.Validate(f00.Expectation, f00.Records)
+	if !v.Passed {
+		t.Fatalf("F00 must still pass: %v", v.Defects())
+	}
+	for _, d := range v.Defects() {
+		if d.Kind == validate.DefectEnvelopeCardinality {
+			t.Errorf("F00 was judged on aggregation it does not claim: %v", d)
+		}
+	}
+}
+
+func aggregateFixture() testkit.Bundle {
+	return testkit.NewSpec(identity.CellF10).MustBuild()
 }

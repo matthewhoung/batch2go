@@ -31,7 +31,14 @@ const (
 	DefectDuplicateRecord       DefectKind = "duplicate_record"
 	DefectConservation          DefectKind = "conservation_residual_exceeds_tolerance"
 	DefectSchemaVersion         DefectKind = "schema_version_mismatch"
-	DefectRequestFailed         DefectKind = "request_failed"
+
+	// The Factor A manipulation check. Without these a proxy that sealed each
+	// member separately and sent B envelopes would satisfy every other defect
+	// class in this list.
+	DefectEnvelopeCardinality       DefectKind = "cohort_did_not_travel_as_one_envelope"
+	DefectEnvelopeStageDisagreement DefectKind = "envelope_stage_disagreement"
+	DefectFormationFailure          DefectKind = "cohort_failed_to_form"
+	DefectRequestFailed             DefectKind = "request_failed"
 )
 
 // Defect is one named finding, attached to the request it concerns where there
@@ -70,6 +77,12 @@ type Verdict struct {
 	// Conservation carries the residuals whether or not they passed. A residual
 	// is reported signed and never relabeled (M1 §4).
 	Conservation ConservationReport `json:"conservation"`
+
+	// Aggregation is what the run's envelopes looked like: how many carried each
+	// cohort, and which cohorts never assembled. It is the evidence behind the
+	// Factor A manipulation check, archived so that a reader can see the counts
+	// rather than only the verdict on them.
+	Aggregation AggregationReport `json:"aggregation"`
 
 	// Executions is the cohort-level account of how the model executions were laid
 	// out in time — the check that can fail where interval coverage could not.
@@ -173,6 +186,12 @@ type Joined struct {
 	StatusBySource map[identity.Emitter]events.Status
 	BatchSize      uint32
 	SchemaVersions map[uint32]bool
+
+	// EnvelopeID is the transport message this request travelled in. Counting the
+	// distinct ids a cohort reports is the cardinality half of the Factor A
+	// manipulation check: one is aggregation, B is B independent envelopes, and
+	// nothing else in the evidence distinguishes them.
+	EnvelopeID identity.EnvelopeID
 }
 
 // Stage returns a joined timestamp and whether it is present.
@@ -232,6 +251,9 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 		if d.Record.BatchSize > 0 {
 			j.BatchSize = d.Record.BatchSize
 		}
+		if d.Record.EnvelopeID != 0 {
+			j.EnvelopeID = d.Record.EnvelopeID
+		}
 	}
 	return out
 }
@@ -257,15 +279,28 @@ func Validate(exp Expectation, records []events.Decoded) Verdict {
 	v := Verdict{Run: exp.Run, Cell: exp.Cell}
 	joined := Join(records)
 
+	// Aggregation runs first because a cohort that never formed changes what the
+	// other checks are looking at. Its members are missing most of their path, and
+	// every check downstream would report that as its own kind of failure — a
+	// dozen missing timestamps, an execution count short by B, membership nobody
+	// attested. All of it true, none of it the diagnosis. The failure is named
+	// once here and the symptoms it produces are displaced rather than added to,
+	// so the cause is not buried under its own consequences.
+	aggregation, aggCheck := checkAggregation(exp, joined)
+	v.Aggregation = aggregation
+	failedFormations := aggregation.FailedCohorts()
+
 	v.Checks = append(v.Checks,
+		aggCheck,
+		checkFormation(aggregation),
 		checkRecordIntegrity(exp, joined),
 		checkClockDomain(exp, joined),
-		checkPresence(exp, joined),
+		checkPresence(exp, withoutCohorts(joined, failedFormations)),
 		checkStageOwnership(exp, joined),
 		checkOrdering(exp, joined),
-		checkMembership(exp, joined),
+		checkMembership(exp, withoutCohorts(joined, failedFormations)),
 		checkContamination(exp),
-		checkAdapterDispatch(exp, joined),
+		checkAdapterDispatch(exp, withoutCohorts(joined, failedFormations)),
 	)
 
 	conservation, check := checkConservation(exp, joined)
