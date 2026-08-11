@@ -454,7 +454,9 @@ type AdapterEvidence struct {
 	// whose definition changes between experimental conditions is not a
 	// measurement of those conditions: the process scope counts the same work once
 	// per concurrent dispatch, so it is comparable within a Factor A level and not
-	// across one.
+	// across one. Neither value reaches the event records yet, and no rule enforces
+	// the restriction — the scope is carried so that the code which archives the
+	// number cannot do so without also carrying what it means.
 	CpuNanos      int64  `protobuf:"varint,3,opt,name=cpu_nanos,json=cpuNanos,proto3" json:"cpu_nanos,omitempty"`
 	CpuScope      string `protobuf:"bytes,4,opt,name=cpu_scope,json=cpuScope,proto3" json:"cpu_scope,omitempty"`
 	unknownFields protoimpl.UnknownFields

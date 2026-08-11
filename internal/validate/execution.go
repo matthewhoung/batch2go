@@ -19,7 +19,11 @@ type ExecutionReport struct {
 
 	// MinGapNanos is the smallest interval between consecutive executions across
 	// the run, and OverlapCount how many consecutive pairs overlapped at all.
+	// GapsMeasured says whether any non-overlapping pair existed to measure: when
+	// every pair overlaps there is no smallest gap, and reporting one would be
+	// inventing a number on exactly the path where the check has failed.
 	MinGapNanos    int64 `json:"min_gap_nanos"`
+	GapsMeasured   int   `json:"gaps_measured"`
 	OverlapCount   int   `json:"overlap_count"`
 	ExecutionPairs int   `json:"execution_pairs"`
 }
@@ -29,6 +33,7 @@ type CohortExecutions struct {
 	Cohort       identity.CohortID `json:"cohort_id"`
 	Executions   int               `json:"executions"`
 	Overlaps     int               `json:"overlapping_pairs"`
+	GapsMeasured int               `json:"gaps_measured"`
 	MinGapNanos  int64             `json:"min_gap_nanos"`
 	SpanNanos    int64             `json:"span_nanos"`
 	ComputeNanos int64             `json:"total_compute_nanos"`
@@ -81,13 +86,12 @@ func checkExecutionSerialization(exp Expectation, joined map[identity.LogicalReq
 	sort.Slice(cohorts, func(i, j int) bool { return cohorts[i] < cohorts[j] })
 
 	var defects []Defect
-	report.MinGapNanos = -1
 
 	for _, cohort := range cohorts {
 		windows := byCohort[cohort]
 		sort.Slice(windows, func(i, j int) bool { return windows[i].start < windows[j].start })
 
-		ce := CohortExecutions{Cohort: cohort, Executions: len(windows), MinGapNanos: -1}
+		ce := CohortExecutions{Cohort: cohort, Executions: len(windows)}
 		for _, w := range windows {
 			ce.ComputeNanos += w.end - w.start
 		}
@@ -112,17 +116,23 @@ func checkExecutionSerialization(exp Expectation, joined map[identity.LogicalReq
 				})
 				continue
 			}
-			if ce.MinGapNanos < 0 || gap < ce.MinGapNanos {
+			if ce.GapsMeasured == 0 || gap < ce.MinGapNanos {
 				ce.MinGapNanos = gap
 			}
-			if report.MinGapNanos < 0 || gap < report.MinGapNanos {
+			ce.GapsMeasured++
+			if report.GapsMeasured == 0 || gap < report.MinGapNanos {
 				report.MinGapNanos = gap
 			}
+			report.GapsMeasured++
 		}
 		report.Cohorts = append(report.Cohorts, ce)
 	}
 
-	detail := fmt.Sprintf("%d consecutive execution pairs, %d overlapping, smallest gap %dns",
-		report.ExecutionPairs, report.OverlapCount, report.MinGapNanos)
+	smallest := "no non-overlapping pair"
+	if report.GapsMeasured > 0 {
+		smallest = fmt.Sprintf("smallest gap %dns", report.MinGapNanos)
+	}
+	detail := fmt.Sprintf("%d consecutive execution pairs, %d overlapping, %s",
+		report.ExecutionPairs, report.OverlapCount, smallest)
 	return report, fail("execution_serialization", defects, detail)
 }

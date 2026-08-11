@@ -174,7 +174,7 @@ func (s Spec) Build() (Bundle, error) {
 				// wait into Q_backend and leaving every other stage's duration
 				// untouched — which is exactly where M1 §2.2 books it.
 				if wait := prevComputeEnd + int64(s.InterExecutionGap) - ts[events.StageComputeStart]; wait > 0 {
-					shiftFrom(ts, events.StageComputeStart, wait)
+					shiftFrom(ts, spans, events.StageComputeStart, wait)
 				}
 			}
 			prevComputeEnd = ts[events.StageComputeEnd]
@@ -207,16 +207,34 @@ func (s Spec) Build() (Bundle, error) {
 	}, nil
 }
 
-// shiftFrom moves stage and everything after it later by delta, so the interval
-// ending at stage stretches and every later interval keeps its duration.
+// shiftFrom moves a stage and everything after it in TRAVERSAL order later by
+// delta, so the interval ending at that stage stretches and every later interval
+// keeps its duration.
+//
+// The order comes from the cell's chain, not from the schema's numbering. Those
+// are different: t_cohort_seal is timestamp 4 but at A=off it is emitted before
+// the client send, so comparing stage numbers would shift the wrong set. The
+// single call site happens to be safe under either, which is precisely why the
+// wrong one would have gone unnoticed.
 //
 // V=on cells are not handled here: a vectorized cohort executes once, so all B
 // members share one execution window rather than serializing. Building that is
 // owned by the testkit work of spec 0002; until then no V=on cell runs, and the
 // serialization check skips them.
-func shiftFrom(ts map[events.Stage]int64, from events.Stage, delta int64) {
-	for stage := range ts {
-		if stage >= from {
+func shiftFrom(ts map[events.Stage]int64, spans []validate.Span, from events.Stage, delta int64) {
+	order := validate.ChainStages(spans)
+	at := -1
+	for i, stage := range order {
+		if stage == from {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return
+	}
+	for _, stage := range order[at:] {
+		if _, ok := ts[stage]; ok {
 			ts[stage] += delta
 		}
 	}

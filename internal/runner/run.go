@@ -521,11 +521,15 @@ func releaseCohort(
 			rec.SetStage(events.StageSched, cohort.ScheduledAt)
 
 			// The barrier is the load generator's synchronization point, and at A=off
-			// the only one anywhere. Every member leaves at the same instant, and at
-			// A=off that instant is the cohort seal, owned here (ADR-0001). At A=on
-			// the proxy owns the seal and this stage is not written here.
+			// the only one anywhere. Every member leaves at the same instant.
 			seal := barrier.Arrive()
-			rec.SetStage(events.StageCohortSeal, seal)
+			// Whether that instant is the cohort seal depends on the cell: at A=off
+			// the load generator owns the seal, at A=on the proxy mints its own when
+			// it seals the envelope (ADR-0001). Writing it unconditionally would
+			// have every A=on request claim a stage its emitter does not own.
+			if events.SealOwner(m.Cell) == identity.EmitterLoadGen {
+				rec.SetStage(events.StageCohortSeal, seal)
+			}
 
 			reqCtx, cancel := context.WithTimeout(ctx, m.RequestTimeout())
 			defer cancel()

@@ -79,8 +79,11 @@ const (
 	// aggregation — exactly the treatment-correlated artifact this project
 	// measures GC and tracing overhead in order to bound.
 	//
-	// So it is recorded as a diagnostic, and the validator must not admit it into
-	// a cross-level contrast while it carries this scope.
+	// So it is recorded as a diagnostic. Nothing enforces that yet: the value does
+	// not reach the event schema or the archive, and no validator rule consumes
+	// the scope — carrying it here is what makes those the next steps rather than
+	// a thing to remember. Until then the scope is a label on a number that only
+	// the response envelope sees.
 	CPUScopeProcess CPUScope = "process"
 
 	// CPUScopeDispatch is reserved for a measurement that counts only the work of
@@ -93,7 +96,8 @@ const (
 )
 
 // ComparableAcrossFactorA reports whether a scope may enter a contrast between
-// A=on and A=off.
+// A=on and A=off. It has no callers yet, because nothing yet computes such a
+// contrast; it exists so that the first thing that does has to ask.
 func (s CPUScope) ComparableAcrossFactorA() bool { return s == CPUScopeDispatch }
 
 // Evidence is what the executor observed about its own dispatch.

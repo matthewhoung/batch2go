@@ -95,9 +95,8 @@ func validateBundle(args []string) error {
 
 	// Residuals are reported whether or not they passed, signed and never
 	// relabeled (M1 §4).
-	fmt.Printf("  conservation: max |residual| %.4f%% of path, max uncovered makespan %.4f%%, tolerance %.2f%%\n",
+	fmt.Printf("  conservation: max |residual| %.4f%% of path, tolerance %.2f%% (cohort intervals reported, not gated)\n",
 		verdict.Conservation.MaxAbsResidualFraction*100,
-		verdict.Conservation.MaxUncoveredMakespanFrac*100,
 		verdict.Conservation.ToleranceFraction*100)
 	for _, s := range verdict.Conservation.Stages {
 		fmt.Printf("    %-18s n=%-5d median=%8dns  min=%8dns  max=%8dns\n",

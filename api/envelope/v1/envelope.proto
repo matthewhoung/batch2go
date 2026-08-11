@@ -107,7 +107,9 @@ message AdapterEvidence {
   // whose definition changes between experimental conditions is not a
   // measurement of those conditions: the process scope counts the same work once
   // per concurrent dispatch, so it is comparable within a Factor A level and not
-  // across one.
+  // across one. Neither value reaches the event records yet, and no rule enforces
+  // the restriction — the scope is carried so that the code which archives the
+  // number cannot do so without also carrying what it means.
   int64 cpu_nanos = 3;
   string cpu_scope = 4;
 }

@@ -29,6 +29,10 @@ type fakeBackend struct {
 	// mismatched mapping is distinguishable from a correct one.
 	membershipFor func(identity.LogicalRequest) []identity.UID
 
+	// holdFor makes completion order differ from submission order, which is the
+	// only way the result-to-member mapping can be observed at all.
+	holdFor func(identity.LogicalRequest) time.Duration
+
 	mu          sync.Mutex
 	inFlight    int
 	maxInFlight int
@@ -52,8 +56,12 @@ func (f *fakeBackend) Submit(ctx context.Context, model string, members []identi
 	start := f.clock()
 	f.mu.Unlock()
 
-	if f.hold > 0 {
-		time.Sleep(f.hold)
+	hold := f.hold
+	if f.holdFor != nil {
+		hold = f.holdFor(members[0])
+	}
+	if hold > 0 {
+		time.Sleep(hold)
 	}
 
 	f.mu.Lock()
@@ -171,14 +179,20 @@ func TestFanOutSubmitsConcurrentlyRatherThanInSequence(t *testing.T) {
 // submission order. A backend that completes members out of order must still
 // have each result paired with the member that produced it.
 func TestResultsPairWithTheirOwnMemberWhateverTheCompletionOrder(t *testing.T) {
+	const unit = 15 * time.Millisecond
+	const size = 4
+
+	// Completion order is the reverse of submission order: ordinal 0 is held
+	// longest and finishes last. If results were collected as they arrived, the
+	// mapping would come back reversed.
 	backend := &fakeBackend{
-		// Later ordinals return first.
-		membershipFor: func(m identity.LogicalRequest) []identity.UID { return []identity.UID{m.UID()} },
+		holdFor: func(m identity.LogicalRequest) time.Duration {
+			return time.Duration(size-int(m.Ordinal)) * unit
+		},
 	}
-	backend.hold = 0
 	e := newExecutor(t, backend)
 
-	members := cohort(4)
+	members := cohort(size)
 	result, _, err := e.Execute(context.Background(), executor.Dispatch{Model: "m", Members: members})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -186,9 +200,17 @@ func TestResultsPairWithTheirOwnMemberWhateverTheCompletionOrder(t *testing.T) {
 	if len(result.Members) != len(members) {
 		t.Fatalf("got %d results, want %d", len(result.Members), len(members))
 	}
+
+	// The fixture has to actually reorder, or this test asserts nothing.
+	completion := append([]call(nil), backend.calls...)
+	if len(completion) != size || completion[0].members[0] != members[size-1] {
+		t.Fatalf("the backend did not complete out of order: first completion was %v", completion[0].members[0])
+	}
+
 	for i, m := range result.Members {
 		if m.Member != members[i] {
-			t.Errorf("result %d describes %v, want %v", i, m.Member, members[i])
+			t.Errorf("result %d describes %v, want %v — results followed completion order, not submission order",
+				i, m.Member, members[i])
 		}
 		if len(m.Membership) != 1 || m.Membership[0] != m.Member.UID() {
 			t.Errorf("%v carries membership %v, which is not its own uid", m.Member, m.Membership)
