@@ -38,7 +38,14 @@ const (
 	DefectEnvelopeCardinality       DefectKind = "cohort_did_not_travel_as_one_envelope"
 	DefectEnvelopeStageDisagreement DefectKind = "envelope_stage_disagreement"
 	DefectFormationFailure          DefectKind = "cohort_failed_to_form"
-	DefectRequestFailed             DefectKind = "request_failed"
+
+	// The fan-out judgement. A serial release produces the same execution count,
+	// the same histogram and the same attested membership as a concurrent one;
+	// only these tell them apart.
+	DefectDispatchSkew     DefectKind = "dispatch_skew_exceeds_bound"
+	DefectFanOutSerial     DefectKind = "fan_out_submissions_did_not_overlap"
+	DefectDispatchEvidence DefectKind = "dispatch_evidence_disagrees_with_its_timestamps"
+	DefectRequestFailed    DefectKind = "request_failed"
 )
 
 // Defect is one named finding, attached to the request it concerns where there
@@ -87,6 +94,12 @@ type Verdict struct {
 	// Executions is the cohort-level account of how the model executions were laid
 	// out in time — the check that can fail where interval coverage could not.
 	Executions ExecutionReport `json:"executions"`
+
+	// FanOut is what the adapter's releases looked like, as structured fields
+	// rather than only as prose in a check's detail. The skew is the quantity a
+	// concurrent release and a serial one differ by, so a reader has to be able to
+	// see it and its bound without parsing a sentence.
+	FanOut FanOutReport `json:"fan_out"`
 }
 
 // Defects flattens every finding, most structural first.
@@ -129,6 +142,13 @@ type Expectation struct {
 	// MaxAdapterDispatchWaitNanos bounds how long a member may sit at the adapter
 	// before dispatch. At A=off the adapter must forward on arrival (ADR-0001).
 	MaxAdapterDispatchWaitNanos int64 `json:"max_adapter_dispatch_wait_nanos"`
+
+	// MaxDispatchSkewNanos bounds first-to-last submit within one fan-out. It is
+	// required wherever the adapter releases more than one member at once: a
+	// fan-out that submitted its members one after another produces the same
+	// execution count, the same batch-size histogram and the same attested
+	// membership as a correct one, and only the skew betrays it.
+	MaxDispatchSkewNanos int64 `json:"max_dispatch_skew_nanos"`
 
 	// Backend accounting, copied verbatim from the bundle. The validator judges
 	// it; it never fetches it.
@@ -192,6 +212,18 @@ type Joined struct {
 	// manipulation check: one is aggregation, B is B independent envelopes, and
 	// nothing else in the evidence distinguishes them.
 	EnvelopeID identity.EnvelopeID
+
+	// DispatchBySource keeps each process's account of the fan-out this request
+	// was released in, rather than one flattened copy.
+	//
+	// By source for the same reason MembershipBySource is: only the adapter can
+	// observe a fan-out, so a second process claiming one is a fault that must be
+	// detectable rather than silently overwritten. HasDispatch says whether any
+	// process claimed one at all, which a zero skew — the honest measurement of a
+	// release of one — must stay distinguishable from (ADR-0005).
+	Dispatch         events.DispatchEvidence
+	HasDispatch      bool
+	DispatchBySource map[identity.Emitter]events.DispatchEvidence
 }
 
 // Stage returns a joined timestamp and whether it is present.
@@ -216,6 +248,7 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 				SchemaVersions:     map[uint32]bool{},
 				MembershipBySource: map[identity.Emitter][]identity.UID{},
 				StatusBySource:     map[identity.Emitter]events.Status{},
+				DispatchBySource:   map[identity.Emitter]events.DispatchEvidence{},
 			}
 			out[req] = j
 		}
@@ -253,6 +286,11 @@ func Join(records []events.Decoded) map[identity.LogicalRequest]*Joined {
 		}
 		if d.Record.EnvelopeID != 0 {
 			j.EnvelopeID = d.Record.EnvelopeID
+		}
+		if d.Record.HasDispatch {
+			j.DispatchBySource[d.Record.Emitter] = d.Record.Dispatch
+			j.Dispatch = d.Record.Dispatch
+			j.HasDispatch = true
 		}
 	}
 	return out
@@ -310,6 +348,10 @@ func Validate(exp Expectation, records []events.Decoded) Verdict {
 	executions, execCheck := checkExecutionSerialization(exp, joined)
 	v.Executions = executions
 	v.Checks = append(v.Checks, execCheck)
+
+	fanOut, fanOutCheck := checkFanOut(exp, withoutCohorts(joined, failedFormations))
+	v.FanOut = fanOut
+	v.Checks = append(v.Checks, fanOutCheck)
 
 	v.Passed = true
 	for _, c := range v.Checks {

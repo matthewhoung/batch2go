@@ -55,12 +55,23 @@ type Spec struct {
 	// could produce.
 	InterExecutionGap time.Duration
 
-	// DispatchSkew is first-to-last submit within one fan-out, as the adapter
-	// would report it. It is zero by default because a concurrent release is what
-	// a correct run produces and zero is the measurement it produces — the
-	// fixtures that give it a value are the ones describing a fan-out that was
-	// not concurrent.
-	DispatchSkew time.Duration
+	// DispatchStagger is how far apart the adapter submitted consecutive members
+	// of one fan-out. Zero is a concurrent release, which is what a correct run
+	// performs and what makes its reported skew a measured zero.
+	//
+	// It is one knob because it is one physical quantity, and the two ways a
+	// fan-out goes wrong are two values of it rather than two mechanisms: a small
+	// stagger is a release whose members still overlap but reached the backend
+	// further apart than the bound allows, and a stagger wider than a member's
+	// whole downstream is a sequence of releases wearing the shape of one call.
+	DispatchStagger time.Duration
+
+	// ReportedSkewNanos overrides what the adapter claims its skew was. Left nil,
+	// the adapter reports what its own dispatch timestamps say — which is what a
+	// correct one does, since both come from the same clock readings. Setting it
+	// builds the fixture where the adapter's arithmetic and its own evidence
+	// disagree, and it is a pointer because zero is a legitimate claim.
+	ReportedSkewNanos *int64
 
 	ToleranceFraction float64
 }
@@ -189,10 +200,17 @@ func (s Spec) Build() (Bundle, error) {
 			}
 		}
 
+		// The adapter reports what its own dispatch timestamps span. At A=off each
+		// envelope is a release of one and there is nothing to skew.
+		skew := int64(0)
+		if s.Cell.AggregatesEnvelopes() {
+			skew = lastOf(stamps, events.StageAdapterDispatch) - firstOf(stamps, events.StageAdapterDispatch)
+		}
+
 		for o := 0; o < s.CohortSize; o++ {
 			req := identity.LogicalRequest{Cohort: cohortID, Ordinal: identity.Ordinal(o)}
 			membership := s.membership(req, batchSize)
-			records = append(records, s.splitByEmitter(req, stamps[o], envelopes[o], membership, batchSize)...)
+			records = append(records, s.splitByEmitter(req, stamps[o], envelopes[o], skew, membership, batchSize)...)
 		}
 	}
 
@@ -212,9 +230,14 @@ func (s Spec) Build() (Bundle, error) {
 			Executions:                  executions,
 			ToleranceFraction:           s.ToleranceFraction,
 			MaxAdapterDispatchWaitNanos: int64(4 * s.Delay("adapter_unpack")),
-			ExecutionCountDelta:         uint64(executions),
-			InferenceCountDelta:         uint64(s.CohortCount * s.CohortSize),
-			BatchSizeHistogram:          map[uint64]uint64{uint64(batchSize): uint64(executions)},
+			// Well above a concurrent release, which skews by nothing, and far below
+			// one execution's service time — the claim the bound stands for is that
+			// the members reached the backend together, so a bound that a serial
+			// fan-out could satisfy would assert nothing.
+			MaxDispatchSkewNanos: int64(2 * s.Delay(validate.StageAdapterUnpack)),
+			ExecutionCountDelta:  uint64(executions),
+			InferenceCountDelta:  uint64(s.CohortCount * s.CohortSize),
+			BatchSizeHistogram:   map[uint64]uint64{uint64(batchSize): uint64(executions)},
 		},
 	}
 	// The builder checks its own output. An A=on fixture that gave each member its
@@ -305,18 +328,19 @@ func (s Spec) aggregateCohort(cohortStart int64, batchSize int) []map[events.Sta
 	send := seal + d(validate.StageAPack)
 	adapterRecv := send + d(validate.StageXReqHop2)
 
-	// One unpack, then a fan-out whose submissions are simultaneous. A skew of
-	// zero is the measurement a concurrent release produces; a fixture that
-	// staggered them by default would make the serial-fan-out defect
-	// indistinguishable from a correct run by degree rather than by kind.
+	// One unpack, then the fan-out. Its submissions are simultaneous by default:
+	// a skew of zero is the measurement a concurrent release produces, and a
+	// fixture that staggered them as a matter of course would make the serial
+	// fan-out differ from a correct run by degree rather than by kind.
 	dispatch := adapterRecv + d(validate.StageAdapterUnpack)
 
 	if batchSize == 1 {
 		// V=off: B executions serializing on the single model instance.
 		var prevComputeEnd int64
 		for o := range ts {
-			ts[o][events.StageAdapterDispatch] = dispatch
-			ts[o][events.StageQueueStart] = dispatch + d(validate.StageXReqHop3)
+			submitted := dispatch + int64(o)*int64(s.DispatchStagger)
+			ts[o][events.StageAdapterDispatch] = submitted
+			ts[o][events.StageQueueStart] = submitted + d(validate.StageXReqHop3)
 			computeStart := ts[o][events.StageQueueStart] + d(validate.StageQBackend)
 			if o > 0 {
 				if wait := prevComputeEnd + int64(s.InterExecutionGap); wait > computeStart {
@@ -361,6 +385,19 @@ func (s Spec) aggregateCohort(cohortStart int64, batchSize int) []map[events.Sta
 		ts[o][events.StageClientRecv] = ts[o][events.StageProxyFanout] + d(validate.StageXRespHop3)
 	}
 	return ts
+}
+
+// firstOf is the earliest value a cohort recorded for one stage — when the
+// cohort as a whole began arriving, or began being released.
+func firstOf(ts []map[events.Stage]int64, stage events.Stage) int64 {
+	var first int64
+	var seen bool
+	for _, m := range ts {
+		if v, ok := m[stage]; ok && (!seen || v < first) {
+			first, seen = v, true
+		}
+	}
+	return first
 }
 
 // lastOf is the latest value a cohort recorded for one stage — when the cohort
@@ -443,6 +480,7 @@ func (s Spec) splitByEmitter(
 	req identity.LogicalRequest,
 	ts map[events.Stage]int64,
 	envelope identity.EnvelopeID,
+	observedSkew int64,
 	membership []identity.UID,
 	batchSize int,
 ) []events.Decoded {
@@ -476,11 +514,18 @@ func (s Spec) splitByEmitter(
 		// that carries dispatch evidence — the same values for every member of one
 		// release, because the evidence describes the release and not the member.
 		if emitter == identity.EmitterAdapter && s.Cell.UsesProxy() {
+			reported := observedSkew
+			if s.ReportedSkewNanos != nil {
+				reported = *s.ReportedSkewNanos
+			}
 			rec.SetDispatch(events.DispatchEvidence{
 				Dispatched: uint32(s.dispatchedPerFanOut()),
-				SkewNanos:  int64(s.DispatchSkew),
+				SkewNanos:  reported,
 				CPUNanos:   int64(s.Delay(validate.StageAdapterUnpack)),
-				CPUScope:   events.CPUScopeProcess,
+				// Whole-process CPU sampled around a dispatch. It is archived with its
+				// scope because the number alone is not interpretable, and at this
+				// scope it may not cross a Factor A level at all.
+				CPUScope: events.CPUScopeProcess,
 			})
 		}
 		var carried bool

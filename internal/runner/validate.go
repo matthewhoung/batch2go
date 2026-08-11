@@ -48,6 +48,7 @@ func Expectation(b *Bundle) (validate.Expectation, error) {
 		Executions:                  m.ExpectedEvidence.Executions,
 		ToleranceFraction:           m.Conservation.ToleranceFraction,
 		MaxAdapterDispatchWaitNanos: m.ExpectedEvidence.MaxAdapterDispatchWaitNanos,
+		MaxDispatchSkewNanos:        m.ExpectedEvidence.MaxDispatchSkewNanos,
 		ExecutionCountDelta:         b.TritonStats.ExecutionCount,
 		InferenceCountDelta:         b.TritonStats.InferenceCount,
 		BatchSizeHistogram:          b.TritonStats.BatchSizes,
