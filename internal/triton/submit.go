@@ -43,6 +43,13 @@ type Submitter struct {
 }
 
 // NewSubmitter builds a submission engine for one model shape.
+// FeatureWidth and PayloadFloats report the tensor shape this submitter builds.
+// They are read back from the built object rather than from the arguments that
+// configured it, so that a process reporting its own configuration reports what
+// it wired (internal/adapter.ProcessRecord).
+func (s *Submitter) FeatureWidth() int  { return s.featureWidth }
+func (s *Submitter) PayloadFloats() int { return s.payloadFloats }
+
 func NewSubmitter(gw *Gateway, featureWidth, payloadFloats int) (*Submitter, error) {
 	if featureWidth <= 0 {
 		return nil, fmt.Errorf("triton: feature width must be positive, got %d", featureWidth)

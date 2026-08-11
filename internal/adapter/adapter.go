@@ -52,6 +52,10 @@ func New(cfg Config, exec executor.Executor, writer *events.Writer, now executor
 	return &Service{cfg: cfg, exec: exec, writer: writer, now: now}, nil
 }
 
+// Model is the Triton entry this adapter submits against, read back from the
+// service so that a process describing itself describes what it is serving.
+func (s *Service) Model() string { return s.cfg.Model }
+
 // Execute terminates one envelope and returns its results.
 //
 // There is no queue, no batching buffer, and nothing to wait on between arrival

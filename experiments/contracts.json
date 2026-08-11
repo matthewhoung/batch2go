@@ -1,9 +1,16 @@
 {
-  "schema_version": 1,
-  "description": "The acceptance suite: the cells this build claims to run, in the order it runs them. Each manifest carries its own expected evidence, so adding a cell is adding its path here and nothing else — gate G1 eventually needs seven cells at two cohort sizes, and the suite has to grow by declaration rather than by machinery.",
-
+  "schema_version": 2,
+  "description": "The acceptance suite: the cells this build claims to run, in the order it runs them. Each manifest carries its own expected evidence, so adding a cell is adding its path here and nothing else \u2014 gate G1 eventually needs seven cells at two cohort sizes, and the suite has to grow by declaration rather than by machinery.",
   "manifests": [
     "experiments/manifests/d0-envv-b4.json",
-    "experiments/manifests/f00-envv-b4.json"
+    "experiments/manifests/f00-envv-b4.json",
+    "experiments/manifests/f10-envv-b4.json"
+  ],
+  "same_implementation": [
+    {
+      "a": "F00",
+      "b": "F10",
+      "why": "The aggregation contrast is a contrast of Factor A only if both cells' adapters wired the same executor against the same model over the same transport limits. Unchecked, it could be a comparison of two client implementations wearing cell labels."
+    }
   ]
 }

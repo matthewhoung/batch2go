@@ -47,22 +47,35 @@ func TestBundleRecordsTheContractsThatProducedIt(t *testing.T) {
 	}
 }
 
-// A bundle from before the envelope contract was recorded is refused rather than
-// read. Its envelope_schema_version would decode as zero, which is not a
-// contract this build could interpret the run against — and a self-describing
-// archive that answers zero is worse than one that will not open.
+// A bundle from before a contract was recorded is refused rather than read. Its
+// missing field would decode as zero, which is not an answer this build could
+// interpret the run against — and a self-describing archive that answers zero is
+// worse than one that will not open.
+//
+// Both older shapes are named, because each one is refused for its own reason: a
+// version-1 bundle predates the envelope protocol being recorded, and a
+// version-2 bundle predates the adapter recording its own configuration — so a
+// version-2 archive read by this build would report an adapter that was never
+// configured, and a comparison against it would compare a run with a blank.
 func TestLoadBundleRefusesAnOlderBundleShape(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "bundle.json")
-	older := []byte(`{"schema_version": 1, "run_id": "run-1", "cell": "F00", "event_schema_version": 1}`)
-	if err := os.WriteFile(path, older, 0o644); err != nil {
-		t.Fatalf("write bundle: %v", err)
-	}
+	for name, body := range map[string]string{
+		"before the envelope protocol was recorded": `{"schema_version": 1, "run_id": "run-1", "cell": "F00", "event_schema_version": 1}`,
+		"before the adapter recorded its own configuration": `{"schema_version": 2, "run_id": "run-1", "cell": "F00",
+			"event_schema_version": 2, "envelope_schema_version": 1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bundle.json")
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatalf("write bundle: %v", err)
+			}
 
-	_, err := LoadBundle(path)
-	if err == nil {
-		t.Fatal("a bundle written under an older format must be refused")
-	}
-	if !strings.Contains(err.Error(), "schema version") {
-		t.Errorf("the error should name the format version, got: %v", err)
+			_, err := LoadBundle(path)
+			if err == nil {
+				t.Fatal("a bundle written under an older format must be refused")
+			}
+			if !strings.Contains(err.Error(), "schema version") {
+				t.Errorf("the error should name the format version, got: %v", err)
+			}
+		})
 	}
 }

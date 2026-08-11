@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/manifest"
 	"github.com/matthewhoung/batch2go/internal/modelrepo"
 	"github.com/matthewhoung/batch2go/internal/runner"
@@ -35,6 +36,8 @@ func main() {
 		err = validateManifest(os.Args[2:])
 	case "contracts":
 		err = contracts(os.Args[2:])
+	case "same-implementation":
+		err = sameImplementation(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -58,7 +61,57 @@ subcommands:
   validate           judge an archived run bundle offline
   validate-manifest  check a manifest without running it
   contracts          run every contract a declared acceptance suite names
+  same-implementation  assert two archived cells differ in their factor levels and nothing else
 `)
+}
+
+// sameImplementation asserts, over two archives, that a pair of cells resolved
+// to one implementation.
+//
+// The aggregation contrast rests on F00 and F10 differing in transport
+// aggregation and in nothing else. Left unchecked that is an article of faith:
+// the two runs use different manifests and start different processes, and a
+// comparison of two client implementations wearing cell labels would produce a
+// clean effect and a wrong one. Like every other judgement here it reads
+// archives only — no network, no live state.
+func sameImplementation(args []string) error {
+	fs := flag.NewFlagSet("same-implementation", flag.ExitOnError)
+	a := fs.String("a", "", "run bundle directory for the first cell")
+	b := fs.String("b", "", "run bundle directory for the second cell")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *a == "" || *b == "" {
+		return fmt.Errorf("same-implementation needs --a and --b")
+	}
+
+	bundleA, err := runner.LoadBundleDir(*a)
+	if err != nil {
+		return err
+	}
+	bundleB, err := runner.LoadBundleDir(*b)
+	if err != nil {
+		return err
+	}
+	return reportComparison(bundleA, bundleB)
+}
+
+// reportComparison prints the finding and turns it into an exit status.
+func reportComparison(a, b *runner.Bundle) error {
+	cmp, err := runner.SameImplementation(a, b)
+	if err != nil {
+		return err
+	}
+	if cmp.Same {
+		fmt.Printf("%s and %s resolved to one implementation\n  digest %s\n", cmp.CellA, cmp.CellB, cmp.Digest)
+		return nil
+	}
+	fmt.Printf("%s and %s did NOT resolve to one implementation:\n", cmp.CellA, cmp.CellB)
+	for _, d := range cmp.Differences {
+		fmt.Printf("  %-34s %s != %s\n", d.Property, d.A, d.B)
+	}
+	return fmt.Errorf("%d properties differ; the contrast between these cells would be a contrast of more than one thing",
+		len(cmp.Differences))
 }
 
 // validateBundle judges an archived run. It touches no network and no live
@@ -202,8 +255,45 @@ func contracts(args []string) error {
 		fmt.Printf("\n")
 	}
 
-	fmt.Printf("contracts: %d of %d validated green (%s)\n", len(declared), len(declared), strings.Join(cells, ", "))
+	// The cells are green; now the cross-cell assertions the suite declares. They
+	// run last because they read the bundles the runs above just wrote, and they
+	// are part of acceptance rather than a separate errand: a contrast between two
+	// cells is only a contrast of one factor if this holds, so a suite that ran
+	// every cell green and never checked it would have proved less than it says.
+	for _, pair := range suite.SameImplementation {
+		fmt.Printf("== same implementation: %s vs %s ==\n", pair.A, pair.B)
+		if pair.Why != "" {
+			fmt.Printf("%s\n", pair.Why)
+		}
+		a, err := bundleForCell(declared, pair.A)
+		if err != nil {
+			return err
+		}
+		b, err := bundleForCell(declared, pair.B)
+		if err != nil {
+			return err
+		}
+		if err := reportComparison(a, b); err != nil {
+			return fmt.Errorf("same implementation %s/%s: %w", pair.A, pair.B, err)
+		}
+		fmt.Printf("\n")
+	}
+
+	fmt.Printf("contracts: %d of %d validated green (%s), %d cross-cell assertions held\n",
+		len(declared), len(declared), strings.Join(cells, ", "), len(suite.SameImplementation))
 	return nil
+}
+
+// bundleForCell loads the archive the suite's run of that cell just wrote. The
+// bundle is read back from disk rather than kept from the run, so the comparison
+// judges the archive — the same thing anyone re-running it later would hold.
+func bundleForCell(declared []*manifest.Manifest, cell identity.Cell) (*runner.Bundle, error) {
+	for _, m := range declared {
+		if m.Cell == cell {
+			return runner.LoadBundleDir(runner.Dir(m))
+		}
+	}
+	return nil, fmt.Errorf("the suite declares no contract for %s", cell)
 }
 
 // executeManifest runs one manifest and reports what the run produced. A failed

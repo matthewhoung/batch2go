@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/matthewhoung/batch2go/internal/identity"
 	"github.com/matthewhoung/batch2go/internal/manifest"
 )
 
 // SuiteSchemaVersion is the acceptance-suite format version.
-const SuiteSchemaVersion = 1
+// It became 2 when the suite began declaring the cross-cell comparisons it
+// asserts. LoadSuite refuses unknown keys, so a version-1 reader would reject a
+// suite carrying them rather than silently running fewer assertions than the
+// file names.
+const SuiteSchemaVersion = 2
 
 // Suite is the declared acceptance set: which cells this build claims to run,
 // and in what order.
@@ -28,7 +33,24 @@ type Suite struct {
 	// root, as the paths inside the manifests themselves are.
 	Manifests []string `json:"manifests"`
 
+	// SameImplementation names the cell pairs whose runs must resolve to one
+	// implementation. It is declared here rather than hardcoded for the same
+	// reason the cells are: which contrasts this build claims is an experimental
+	// statement, and a shell or a switch asserting them would be deciding
+	// something the suite exists to declare.
+	SameImplementation []CellPair `json:"same_implementation,omitempty"`
+
 	contracts []*manifest.Manifest
+}
+
+// CellPair is one declared cross-cell assertion.
+type CellPair struct {
+	A identity.Cell `json:"a"`
+	B identity.Cell `json:"b"`
+
+	// Why states what the pair establishes, so a reader of the suite file learns
+	// why the comparison is there without opening the code that runs it.
+	Why string `json:"why,omitempty"`
 }
 
 // LoadSuite reads a declared acceptance suite and parses every manifest it
@@ -78,6 +100,27 @@ func LoadSuite(path string) (*Suite, error) {
 		}
 		bundles[dir] = p
 		s.contracts = append(s.contracts, m)
+	}
+
+	// A comparison naming a cell the suite does not run has no bundle to read and
+	// would be skipped at the moment it mattered. Refusing it here is the same
+	// rule as refusing an empty suite: an assertion that cannot execute is worse
+	// than no assertion, because the file says it is there.
+	declared := make(map[identity.Cell]bool, len(s.contracts))
+	for _, m := range s.contracts {
+		declared[m.Cell] = true
+	}
+	for _, pair := range s.SameImplementation {
+		if pair.A == pair.B {
+			return nil, fmt.Errorf("runner: suite %s compares %s with itself, which passes by saying nothing", path, pair.A)
+		}
+		for _, cell := range []identity.Cell{pair.A, pair.B} {
+			if !declared[cell] {
+				return nil, fmt.Errorf(
+					"runner: suite %s declares a %s/%s comparison but does not run %s, so the comparison has no bundle to read",
+					path, pair.A, pair.B, cell)
+			}
+		}
 	}
 	return &s, nil
 }

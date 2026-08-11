@@ -86,19 +86,31 @@ func TestLoadSuiteRefusesASuiteItCannotTrust(t *testing.T) {
 			`{"schema_version": 99, "manifests": ["` + good + `"]}`, "schema version",
 		},
 		"no contracts": {
-			`{"schema_version": 1, "manifests": []}`, "no contracts",
+			`{"schema_version": 2, "manifests": []}`, "no contracts",
 		},
 		"a cell declared twice": {
-			`{"schema_version": 1, "manifests": ["` + good + `", "` + good + `"]}`, "twice",
+			`{"schema_version": 2, "manifests": ["` + good + `", "` + good + `"]}`, "twice",
 		},
 		"a manifest that is not there": {
-			`{"schema_version": 1, "manifests": ["experiments/manifests/nope.json"]}`, "nope.json",
+			`{"schema_version": 2, "manifests": ["experiments/manifests/nope.json"]}`, "nope.json",
 		},
 		"two contracts writing one bundle": {
-			`{"schema_version": 1, "manifests": ["` + good + `", "` + goodCopy + `"]}`, "overwrite",
+			`{"schema_version": 2, "manifests": ["` + good + `", "` + goodCopy + `"]}`, "overwrite",
 		},
 		"a key nobody reads": {
-			`{"schema_version": 1, "manifests": ["` + good + `"], "cells": ["F10"]}`, "cells",
+			`{"schema_version": 2, "manifests": ["` + good + `"], "cells": ["F10"]}`, "cells",
+		},
+
+		// A declared comparison must be executable. One naming a cell the suite
+		// does not run would be skipped at the moment it mattered, while the file
+		// went on claiming the assertion was there.
+		"a comparison against a cell the suite does not run": {
+			`{"schema_version": 2, "manifests": ["` + good + `"],
+			  "same_implementation": [{"a": "F00", "b": "F10"}]}`, "no bundle to read",
+		},
+		"a comparison of a cell with itself": {
+			`{"schema_version": 2, "manifests": ["` + good + `"],
+			  "same_implementation": [{"a": "F00", "b": "F00"}]}`, "itself",
 		},
 	}
 

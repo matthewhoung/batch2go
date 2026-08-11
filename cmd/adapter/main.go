@@ -94,7 +94,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	exec, err := newExecutor(parsedCell, submitter, clock.Now)
+	exec, kind, err := newExecutor(parsedCell, submitter, clock.Now)
 	if err != nil {
 		return err
 	}
@@ -122,6 +122,36 @@ func run() error {
 		},
 	}, exec, writer, clock.Now)
 	if err != nil {
+		return err
+	}
+
+	// What this process actually wired, written before it serves anything.
+	//
+	// Every value comes from the live object rather than from the flag that built
+	// it: the channel from the gateway, the tensor shape from the submitter, the
+	// executor kind from the code that selected it. A record assembled from the
+	// flags would restate the manifest the runner already archived, and two cells
+	// would then agree on their configuration whatever their processes did — the
+	// tautology this record exists to break.
+	serving := adapter.ServingConfig{
+		MaxMessageBytes:       *maxMessageBytes,
+		InitialWindowSize:     int32(*initialWindow),
+		InitialConnWindowSize: int32(*initialConnWindow),
+	}
+	if err := adapter.WriteProcessRecord(*eventsPath, adapter.ProcessRecord{
+		SchemaVersion: adapter.ProcessRecordSchemaVersion,
+		Experiment:    identity.ExperimentID(*experiment),
+		Session:       identity.SessionID(*session),
+		Run:           identity.RunID(*runID),
+		Cell:          parsedCell,
+		ClockDomain:   clock.ID,
+		Executor:      kind,
+		ModelEntry:    service.Model(),
+		Downstream:    gw.Config(),
+		Serving:       serving,
+		FeatureWidth:  submitter.FeatureWidth(),
+		PayloadFloats: submitter.PayloadFloats(),
+	}); err != nil {
 		return err
 	}
 
@@ -167,15 +197,21 @@ func run() error {
 // kind first — but the default is an error rather than the individual executor,
 // because a silent fall back is exactly the failure this wiring exists to
 // prevent: it would run a V=on cell as V=off and record it under the V=on label.
-func newExecutor(cell identity.Cell, submitter *triton.Submitter, now executor.Clock) (executor.Executor, error) {
+// It returns the kind it wired as well as the executor, because the bundle
+// records what this process built rather than what the cell implies. Deriving
+// the kind again at record time would report the second, and the record would
+// then agree with the manifest by construction — which is exactly the tautology
+// the record exists to break.
+func newExecutor(cell identity.Cell, submitter *triton.Submitter, now executor.Clock) (executor.Executor, executor.Kind, error) {
 	kind, err := executor.SelectKind(cell)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	switch kind {
 	case executor.KindIndividual:
-		return individual.New(submitter, now)
+		exec, err := individual.New(submitter, now)
+		return exec, kind, err
 	default:
-		return nil, fmt.Errorf("adapter: cell %s selected the %s executor, which this binary does not wire", cell, kind)
+		return nil, "", fmt.Errorf("adapter: cell %s selected the %s executor, which this binary does not wire", cell, kind)
 	}
 }

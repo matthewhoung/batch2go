@@ -136,6 +136,10 @@ contracts: build ## The acceptance suite: both seams, every contract experiments
 validate: ## Judge an archived bundle offline (BUNDLE=results/bundles/<run>)
 	$(GO) run ./cmd/runner validate --bundle $(BUNDLE)
 
+.PHONY: same-implementation
+same-implementation: ## Assert two archived cells differ in their factor levels and nothing else (BUNDLE_A=, BUNDLE_B=)
+	$(GO) run ./cmd/runner same-implementation --a $(BUNDLE_A) --b $(BUNDLE_B)
+
 .PHONY: smoke
 smoke: ## One request through the gateway; prints the verified uid attestation
 	$(GO) run ./cmd/smoke \

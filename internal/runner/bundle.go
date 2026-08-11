@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/matthewhoung/batch2go/internal/adapter"
 	"github.com/matthewhoung/batch2go/internal/envelope"
 	"github.com/matthewhoung/batch2go/internal/events"
 	"github.com/matthewhoung/batch2go/internal/events/clockdomain"
@@ -23,11 +24,12 @@ import (
 // BundleSchemaVersion is the run-bundle format version.
 //
 // It became 2 when the bundle started naming the envelope protocol that carried
-// its payloads. A bundle written before that decodes the new field as zero,
-// which is indistinguishable from a real answer — so the version moves and
-// LoadBundle refuses the older shape rather than reading a contract number out
-// of a field nobody wrote.
-const BundleSchemaVersion = 2
+// its payloads, and 3 when the adapter began recording its own configuration. A
+// bundle written before either decodes the new field as its zero value, which is
+// indistinguishable from a real answer — so the version moves and LoadBundle
+// refuses the older shape rather than reading a contract number, or an adapter's
+// transport limits, out of a field nobody wrote.
+const BundleSchemaVersion = 3
 
 // Terminal run states.
 const (
@@ -69,6 +71,12 @@ type Bundle struct {
 	// change between slices while archived runs do not.
 	EventSchemaVersion    int `json:"event_schema_version"`
 	EnvelopeSchemaVersion int `json:"envelope_schema_version"`
+
+	// Adapter is the adapter process's own account of how it was configured. It
+	// is a pointer because D0 has no adapter at all: an absent one is typed
+	// absence, exactly as a stage outside a cell's topology is, and a zero-valued
+	// record would let a direct-path bundle claim a transport nobody set.
+	Adapter *adapter.ProcessRecord `json:"adapter,omitempty"`
 
 	Server        ServerRecord         `json:"server"`
 	ModelEntry    modelrepo.Entry      `json:"model_entry"`
@@ -171,8 +179,26 @@ func WriteBundle(l Layout, b *Bundle) error {
 	return writeJSON(l.Bundle, b)
 }
 
-// LoadBundle reads a bundle description back. It is how the validator and the
-// analysis toolchain open an archived run.
+// BundleFileName is what a bundle description is called inside its directory.
+// It is named once so that no caller has to know it, which is how a directory
+// came to be handed to a function that opens a file.
+const BundleFileName = "bundle.json"
+
+// LoadBundleDir reads the bundle description out of a run's directory.
+//
+// It exists because every operator-facing path in this repository names a run by
+// its directory — `make validate BUNDLE=results/bundles/<run>`, the suite's own
+// Dir(), the archive layout — while LoadBundle opens a file. Passing one to the
+// other opens the directory successfully and fails on the first read, so the
+// mistake surfaces as a JSON error about something that is not JSON, at the
+// moment the command is used rather than when it is built. Callers holding a
+// directory use this; LoadBundle stays for callers that genuinely hold a path.
+func LoadBundleDir(dir string) (*Bundle, error) {
+	return LoadBundle(filepath.Join(dir, BundleFileName))
+}
+
+// LoadBundle reads a bundle description back from the path of the file itself.
+// It is how the validator and the analysis toolchain open an archived run.
 func LoadBundle(path string) (*Bundle, error) {
 	f, err := os.Open(path)
 	if err != nil {
