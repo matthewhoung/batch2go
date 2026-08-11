@@ -86,19 +86,21 @@ Requires Docker with GPU access, Go, and [uv](https://docs.astral.sh/uv/). Every
 
 ```bash
 make stack-up    # generate the synthetic models, verify digests, start Triton (pinned by digest)
-make contracts   # the acceptance suite: both seams, D0 and F00 at B=4, both bundles validated
+make contracts   # the acceptance suite: both seams, every declared contract, all bundles validated
 make stack-down
 ```
 
-`make contracts` runs the offline seam first (the validator's conservation self-test against injected known delays, plus the defect fixtures it must reject), then the live seam: each manifest end to end against real Triton, producing a run bundle that the validator judges from the archive alone. `make validate BUNDLE=results/bundles/<run>` re-judges an archived bundle with no network and no live state, which is the property that makes a verdict reproducible by anyone holding it.
+`make contracts` runs the offline seam first (the validator's conservation self-test against injected known delays, plus the defect fixtures it must reject), then the live seam: each contract end to end against real Triton, producing a run bundle that the validator judges from the archive alone. It stops at the first failure, because verdicts produced after a failed cell describe a stack whose earlier condition did not hold.
+
+The suite is declared, not built in: [`experiments/contracts.json`](experiments/contracts.json) names the cells this build claims, in order, and each manifest carries the evidence its run is judged against. Adding a cell is adding a manifest and its path in that file — there is no per-cell make target. `make run MANIFEST=experiments/manifests/<cell>.json` executes one on its own, and `make validate BUNDLE=results/bundles/<run>` re-judges an archived bundle with no network and no live state, which is the property that makes a verdict reproducible by anyone holding it.
 
 Other targets: `make test` (unit tests beneath the seams), `make test-models` (the ONNX attestation contract, including the naive-echo counter-fixture), `make bench-events` (the hot-path record writer, which must report zero allocations), `make smoke` (one request through the gateway, printing the verified uid attestation).
 
 ## Status
 
-- [x] Public design record: glossary, ADR-0001…0008, spec 0001
+- [x] Public design record: glossary, ADR-0001…0010, specs 0001–0002
 - [x] Spec 0001 — walking skeleton: D0 + F00 end to end
-- [ ] Spec 0002 — envelope aggregation (F10)
+- [ ] Spec 0002 — envelope aggregation (F10) — specified, in implementation
 - [ ] Spec 0003 — scheduler-formed batching (F01, F11-D) + exact-B conformance
 - [ ] Spec 0004 — full contract matrix, all seven cells
 - [ ] Spec 0005 — AWS infrastructure (Terraform; provably clean teardown)
