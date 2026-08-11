@@ -55,7 +55,23 @@ type Spec struct {
 	// could produce.
 	InterExecutionGap time.Duration
 
+	// DispatchSkew is first-to-last submit within one fan-out, as the adapter
+	// would report it. It is zero by default because a concurrent release is what
+	// a correct run produces and zero is the measurement it produces — the
+	// fixtures that give it a value are the ones describing a fan-out that was
+	// not concurrent.
+	DispatchSkew time.Duration
+
 	ToleranceFraction float64
+}
+
+// dispatchedPerFanOut is how many members the adapter releases in one call: one
+// per envelope at A=off, the whole cohort at A=on.
+func (s Spec) dispatchedPerFanOut() int {
+	if s.Cell.AggregatesEnvelopes() {
+		return s.CohortSize
+	}
+	return 1
 }
 
 // DefaultStageDelay is used for any stage the spec does not name.
@@ -150,42 +166,38 @@ func (s Spec) Build() (Bundle, error) {
 	batchSize, executionsPerCohort := s.evidenceShape()
 
 	var records []events.Decoded
+	var nextEnvelope identity.EnvelopeID
 	for c := 0; c < s.CohortCount; c++ {
 		cohortID := s.FirstCohortID + identity.CohortID(c)
 		cohortStart := s.BaseInstant + int64(c)*int64(s.CohortGap)
 
-		// prevComputeEnd carries the serialization forward: member i cannot begin
-		// executing until member i-1 has finished on the one model instance.
-		var prevComputeEnd int64
+		var stamps []map[events.Stage]int64
+		var envelopes []identity.EnvelopeID
+		if s.Cell.AggregatesEnvelopes() {
+			stamps = s.aggregateCohort(cohortStart, batchSize)
+			// One envelope carries the whole cohort, so its id is the cohort's and
+			// every member reports it. A fixture that minted one per member would be
+			// describing B envelopes wearing an A=on label — which is exactly the
+			// fake the cardinality check exists to catch, and it would pass.
+			nextEnvelope++
+			envelopes = repeatEnvelope(nextEnvelope, s.CohortSize)
+		} else {
+			stamps = s.independentCohort(spans, cohortStart, batchSize)
+			for o := 0; o < s.CohortSize; o++ {
+				nextEnvelope++
+				envelopes = append(envelopes, nextEnvelope)
+			}
+		}
+
 		for o := 0; o < s.CohortSize; o++ {
 			req := identity.LogicalRequest{Cohort: cohortID, Ordinal: identity.Ordinal(o)}
-
-			// Walk the chain, giving each named stage its injected duration.
-			ts := map[events.Stage]int64{}
-			now := cohortStart + int64(o)*int64(s.MemberStagger)
-			ts[spans[0].Start] = now
-			for _, span := range spans {
-				now += int64(s.Delay(span.Name))
-				ts[span.End] = now
-			}
-
-			if batchSize == 1 && o > 0 {
-				// Push this member's execution behind the previous one, absorbing the
-				// wait into Q_backend and leaving every other stage's duration
-				// untouched — which is exactly where M1 §2.2 books it.
-				if wait := prevComputeEnd + int64(s.InterExecutionGap) - ts[events.StageComputeStart]; wait > 0 {
-					shiftFrom(ts, spans, events.StageComputeStart, wait)
-				}
-			}
-			prevComputeEnd = ts[events.StageComputeEnd]
-
 			membership := s.membership(req, batchSize)
-			records = append(records, s.splitByEmitter(req, ts, membership, batchSize)...)
+			records = append(records, s.splitByEmitter(req, stamps[o], envelopes[o], membership, batchSize)...)
 		}
 	}
 
 	executions := s.CohortCount * executionsPerCohort
-	return Bundle{
+	bundle := Bundle{
 		Spec:    s,
 		Records: records,
 		Expectation: validate.Expectation{
@@ -204,7 +216,163 @@ func (s Spec) Build() (Bundle, error) {
 			InferenceCountDelta:         uint64(s.CohortCount * s.CohortSize),
 			BatchSizeHistogram:          map[uint64]uint64{uint64(batchSize): uint64(executions)},
 		},
-	}, nil
+	}
+	// The builder checks its own output. An A=on fixture that gave each member its
+	// own seal would satisfy every F10 assertion in the validator while describing
+	// evidence no proxy could emit, and the assertions would then be tested
+	// against a fiction. This has happened once already: the first fixtures
+	// modelled the backend as fully parallel, contradicting the serialization the
+	// design declares, and it went unnoticed until a check was written that could
+	// fail.
+	if err := bundle.checkGranularity(); err != nil {
+		return Bundle{}, err
+	}
+	return bundle, nil
+}
+
+// repeatEnvelope gives every member of a cohort the same envelope id.
+func repeatEnvelope(id identity.EnvelopeID, n int) []identity.EnvelopeID {
+	out := make([]identity.EnvelopeID, n)
+	for i := range out {
+		out[i] = id
+	}
+	return out
+}
+
+// independentCohort is the A=off construction: every member walks the whole
+// chain on its own, because nothing joins them anywhere on the path.
+func (s Spec) independentCohort(spans []validate.Span, cohortStart int64, batchSize int) []map[events.Stage]int64 {
+	out := make([]map[events.Stage]int64, s.CohortSize)
+
+	// prevComputeEnd carries the serialization forward: member i cannot begin
+	// executing until member i-1 has finished on the one model instance.
+	var prevComputeEnd int64
+	for o := 0; o < s.CohortSize; o++ {
+		// Walk the chain, giving each named stage its injected duration.
+		ts := map[events.Stage]int64{}
+		now := cohortStart + int64(o)*int64(s.MemberStagger)
+		ts[spans[0].Start] = now
+		for _, span := range spans {
+			now += int64(s.Delay(span.Name))
+			ts[span.End] = now
+		}
+
+		if batchSize == 1 && o > 0 {
+			// Push this member's execution behind the previous one, absorbing the
+			// wait into Q_backend and leaving every other stage's duration
+			// untouched — which is exactly where M1 §2.2 books it.
+			if wait := prevComputeEnd + int64(s.InterExecutionGap) - ts[events.StageComputeStart]; wait > 0 {
+				shiftFrom(ts, spans, events.StageComputeStart, wait)
+			}
+		}
+		prevComputeEnd = ts[events.StageComputeEnd]
+		out[o] = ts
+	}
+	return out
+}
+
+// aggregateCohort is the A=on construction: the cohort is assembled, sealed,
+// sent, executed and answered as one object, and only the parts that really are
+// per member vary between members.
+//
+// It cannot be a per-member walk. Walking the chain independently would give
+// every member its own seal, its own envelope timestamps and its own response —
+// evidence no proxy could emit, and evidence against which every F10 assertion
+// would pass. What varies per member is where the physics says it does: when a
+// member reached the proxy, when its own execution ran, and when its own answer
+// went back.
+func (s Spec) aggregateCohort(cohortStart int64, batchSize int) []map[events.Stage]int64 {
+	d := func(stage string) int64 { return int64(s.Delay(stage)) }
+
+	ts := make([]map[events.Stage]int64, s.CohortSize)
+	for o := range ts {
+		ts[o] = map[events.Stage]int64{}
+	}
+
+	// The members arrive on their own schedules; nothing has joined them yet.
+	for o := range ts {
+		ts[o][events.StageSched] = cohortStart + int64(o)*int64(s.MemberStagger)
+		ts[o][events.StageClientSend] = ts[o][events.StageSched] + d(validate.StageReleaseToSend)
+		ts[o][events.StageProxyRecv] = ts[o][events.StageClientSend] + d(validate.StageXReqHop1)
+	}
+
+	// Formation ends when the cohort is whole, so the seal follows the LAST
+	// arrival. Every member's W_form is measured back to its own arrival from
+	// that one instant, which is why the first to arrive waits longest and why
+	// the injected W_form is the floor of the cohort's spread rather than its
+	// median.
+	seal := lastOf(ts, events.StageProxyRecv) + d(validate.StageWForm)
+	send := seal + d(validate.StageAPack)
+	adapterRecv := send + d(validate.StageXReqHop2)
+
+	// One unpack, then a fan-out whose submissions are simultaneous. A skew of
+	// zero is the measurement a concurrent release produces; a fixture that
+	// staggered them by default would make the serial-fan-out defect
+	// indistinguishable from a correct run by degree rather than by kind.
+	dispatch := adapterRecv + d(validate.StageAdapterUnpack)
+
+	if batchSize == 1 {
+		// V=off: B executions serializing on the single model instance.
+		var prevComputeEnd int64
+		for o := range ts {
+			ts[o][events.StageAdapterDispatch] = dispatch
+			ts[o][events.StageQueueStart] = dispatch + d(validate.StageXReqHop3)
+			computeStart := ts[o][events.StageQueueStart] + d(validate.StageQBackend)
+			if o > 0 {
+				if wait := prevComputeEnd + int64(s.InterExecutionGap); wait > computeStart {
+					computeStart = wait
+				}
+			}
+			ts[o][events.StageComputeStart] = computeStart
+			ts[o][events.StageComputeEnd] = computeStart + d(validate.StageSComp)
+			prevComputeEnd = ts[o][events.StageComputeEnd]
+			ts[o][events.StageAdapterResult] = ts[o][events.StageComputeEnd] + d(validate.StageXRespHop1)
+		}
+	} else {
+		// V=on: the cohort is one execution, so its members share one window
+		// rather than each having their own. A fixture that gave them separate
+		// windows would describe B executions wearing a V=on label.
+		queueStart := dispatch + d(validate.StageXReqHop3)
+		computeStart := queueStart + d(validate.StageQBackend)
+		computeEnd := computeStart + d(validate.StageSComp)
+		for o := range ts {
+			ts[o][events.StageAdapterDispatch] = dispatch
+			ts[o][events.StageQueueStart] = queueStart
+			ts[o][events.StageComputeStart] = computeStart
+			ts[o][events.StageComputeEnd] = computeEnd
+			ts[o][events.StageAdapterResult] = computeEnd + d(validate.StageXRespHop1)
+		}
+	}
+
+	// One response, packed after the last member's result and carried back once.
+	adapterSend := lastOf(ts, events.StageAdapterResult) + d(validate.StageResponsePack)
+	respRecv := adapterSend + d(validate.StageXRespHop2)
+
+	for o := range ts {
+		ts[o][events.StageCohortSeal] = seal
+		ts[o][events.StageProxySend] = send
+		ts[o][events.StageAdapterRecv] = adapterRecv
+		ts[o][events.StageAdapterSend] = adapterSend
+		ts[o][events.StageProxyRespRecv] = respRecv
+		// The fan-out back is the member's own stage, and the fixture gives each
+		// the same duration rather than modelling the wake order: what makes it a
+		// member's stage is who owns it, not that its value has to differ.
+		ts[o][events.StageProxyFanout] = respRecv + d(validate.StageFFanout)
+		ts[o][events.StageClientRecv] = ts[o][events.StageProxyFanout] + d(validate.StageXRespHop3)
+	}
+	return ts
+}
+
+// lastOf is the latest value a cohort recorded for one stage — when the cohort
+// as a whole finished arriving, or finished executing.
+func lastOf(ts []map[events.Stage]int64, stage events.Stage) int64 {
+	var last int64
+	for _, m := range ts {
+		if v, ok := m[stage]; ok && v > last {
+			last = v
+		}
+	}
+	return last
 }
 
 // shiftFrom moves a stage and everything after it in TRAVERSAL order later by
@@ -274,6 +442,7 @@ func (s Spec) membership(req identity.LogicalRequest, batchSize int) []identity.
 func (s Spec) splitByEmitter(
 	req identity.LogicalRequest,
 	ts map[events.Stage]int64,
+	envelope identity.EnvelopeID,
 	membership []identity.UID,
 	batchSize int,
 ) []events.Decoded {
@@ -295,6 +464,24 @@ func (s Spec) splitByEmitter(
 			Cohort:  req.Cohort,
 			Ordinal: req.Ordinal,
 			Status:  events.StatusOK,
+		}
+		// The envelope id rides with the processes that handled the envelope. It
+		// is what the cardinality check counts: one per cohort at A=on, one per
+		// member at A=off, and a fixture that left it zero would make those two
+		// indistinguishable.
+		if emitter == identity.EmitterProxy || emitter == identity.EmitterAdapter {
+			rec.EnvelopeID = envelope
+		}
+		// The adapter is where the fan-out is observed, so it is the only emitter
+		// that carries dispatch evidence — the same values for every member of one
+		// release, because the evidence describes the release and not the member.
+		if emitter == identity.EmitterAdapter && s.Cell.UsesProxy() {
+			rec.SetDispatch(events.DispatchEvidence{
+				Dispatched: uint32(s.dispatchedPerFanOut()),
+				SkewNanos:  int64(s.DispatchSkew),
+				CPUNanos:   int64(s.Delay(validate.StageAdapterUnpack)),
+				CPUScope:   events.CPUScopeProcess,
+			})
 		}
 		var carried bool
 		for _, stage := range owned.Stages() {
@@ -329,6 +516,77 @@ func (s Spec) splitByEmitter(
 		})
 	}
 	return out
+}
+
+// checkGranularity verifies that the bundle carries evidence at the granularity
+// the cell's own path would have produced it at.
+//
+// It runs on every fixture the builder produces, before any test sees one. The
+// assertions that judge an A=on bundle are only as good as the evidence they are
+// tested against, and a fixture that quietly gave each member its own seal would
+// let all of them pass while describing a run no proxy could have performed. The
+// check is deliberately about what a cohort shares rather than about the values
+// themselves: it is the shape that carries the claim.
+func (b Bundle) checkGranularity() error {
+	if !b.Spec.Cell.AggregatesEnvelopes() {
+		return nil
+	}
+
+	shared := validate.EnvelopeStages().Stages()
+	for c := 0; c < b.Spec.CohortCount; c++ {
+		cohort := b.Spec.FirstCohortID + identity.CohortID(c)
+
+		envelopes := map[identity.EnvelopeID]bool{}
+		values := map[events.Stage]map[int64]bool{}
+		var windows map[[2]int64]bool
+		if b.Spec.Cell.VectorizesCompute() {
+			windows = map[[2]int64]bool{}
+		}
+
+		for _, d := range b.Records {
+			rec := d.Record
+			if rec.Cohort != cohort {
+				continue
+			}
+			if rec.EnvelopeID != 0 {
+				envelopes[rec.EnvelopeID] = true
+			}
+			for _, stage := range shared {
+				if v, ok := rec.Stage(stage); ok {
+					if values[stage] == nil {
+						values[stage] = map[int64]bool{}
+					}
+					values[stage][v] = true
+				}
+			}
+			if windows != nil {
+				start, okStart := rec.Stage(events.StageComputeStart)
+				end, okEnd := rec.Stage(events.StageComputeEnd)
+				if okStart && okEnd {
+					windows[[2]int64{start, end}] = true
+				}
+			}
+		}
+
+		if len(envelopes) != 1 {
+			return fmt.Errorf(
+				"testkit: cohort %d travelled in %d envelopes; at A=on one envelope carries the cohort, and a fixture of B envelopes is the fake the cardinality check exists to catch",
+				cohort, len(envelopes))
+		}
+		for _, stage := range shared {
+			if n := len(values[stage]); n > 1 {
+				return fmt.Errorf(
+					"testkit: cohort %d carries %d distinct values of %s; it describes the envelope, so its members share one",
+					cohort, n, stage)
+			}
+		}
+		if windows != nil && len(windows) != 1 {
+			return fmt.Errorf(
+				"testkit: cohort %d has %d distinct execution windows; at V=on the cohort is one execution and its members share one window",
+				cohort, len(windows))
+		}
+	}
+	return nil
 }
 
 // Clone returns a deep copy so a defect can be planted without disturbing the

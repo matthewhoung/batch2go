@@ -146,6 +146,35 @@ func sharedPathTail() []Span {
 	}
 }
 
+// EnvelopeStages are the timestamps that describe a transport envelope rather
+// than a member of it.
+//
+// The split follows from who observes what. One envelope is sealed once, sent
+// once, received once, answered once and comes back once, so those five instants
+// belong to the envelope; a member's arrival at the proxy, its place in the
+// adapter's fan-out, its own execution and its own fan-out back are the member's.
+//
+// The seal is among them because at A=on the proxy mints it when it seals the
+// envelope. At A=off it is the load generator's barrier release, shared by the
+// cohort for a different reason, and the rest of the set is per member — an
+// envelope carries one member there, so the two granularities coincide and the
+// distinction has nothing to say.
+//
+// At A=on it is the whole manipulation check. A proxy that sealed each member
+// separately and sent B envelopes would produce the same execution count, the
+// same batch-size histogram and the same attested membership as a correct one,
+// and the only thing that would differ is whether a cohort's members agree on
+// these five values.
+func EnvelopeStages() events.StageMask {
+	return events.MaskOf(
+		events.StageCohortSeal,
+		events.StageProxySend,
+		events.StageAdapterRecv,
+		events.StageAdapterSend,
+		events.StageProxyRespRecv,
+	)
+}
+
 // ConservedSpan is the interval the conservation identity is stated over:
 // client send to client completion, i.e. t15 − t2 (M2-PLAN §4.3).
 //
