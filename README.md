@@ -94,7 +94,7 @@ make stack-down
 
 The suite is declared, not built in: [`experiments/contracts.json`](experiments/contracts.json) names the cells this build claims, in order, and each manifest carries the evidence its run is judged against. Adding a cell is adding a manifest and its path in that file — there is no per-cell make target. `make run MANIFEST=experiments/manifests/<cell>.json` executes one on its own, and `make validate BUNDLE=results/bundles/<run>` re-judges an archived bundle with no network and no live state, which is the property that makes a verdict reproducible by anyone holding it.
 
-Other targets: `make test` (unit tests beneath the seams), `make test-models` (the ONNX attestation contract, including the naive-echo counter-fixture), `make bench-events` (the hot-path record writer, which must report zero allocations), `make smoke` (one request through the gateway, printing the verified uid attestation).
+Other targets: `make test` (unit tests beneath the seams), `make test-race` (the same, under the race detector — the proxy holds a cohort at A=on, and that is the one place in the tree where concurrency is the behavior rather than an implementation detail), `make test-models` (the ONNX attestation contract, including the naive-echo counter-fixture), `make bench-events` (the hot-path record writer, which must report zero allocations), `make smoke` (one request through the gateway, printing the verified uid attestation).
 
 ## Status
 

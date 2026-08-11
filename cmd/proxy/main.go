@@ -2,7 +2,7 @@
 //
 // It is an independently deployable binary so that Env 2 can place it with the
 // load generator on a separate node. This file parses flags and wires
-// components; the pass-through behavior lives in internal/proxy.
+// components; what the proxy does at each factor level lives in internal/proxy.
 package main
 
 import (
@@ -63,6 +63,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Which cells this build runs is settled in one place, and the proxy consults
+	// it as the adapter does. Until F10 landed, an unimplemented A=on cell was
+	// refused by the service itself for being A=on at all; now that A=on is a
+	// level the proxy serves, the cell has to be checked against the authority
+	// rather than against a property it shares with cells that do run.
+	if err := parsedCell.CheckImplemented(); err != nil {
+		return err
+	}
 
 	clock, err := clockdomain.Establish()
 	if err != nil {
@@ -112,11 +120,12 @@ func run() error {
 	}
 	defer writer.Close()
 
+	formationDeadline := time.Duration(*formationDeadlineMillis) * time.Millisecond
 	service, err := proxy.New(proxy.Config{
 		Cell:              parsedCell,
 		Run:               identity.RunID(*runID),
 		TargetB:           *targetB,
-		FormationDeadline: time.Duration(*formationDeadlineMillis) * time.Millisecond,
+		FormationDeadline: formationDeadline,
 	}, builder, envelopev1.NewBackendClient(conn), writer, clock.Now)
 	if err != nil {
 		return err
@@ -141,8 +150,15 @@ func run() error {
 		server.GracefulStop()
 	}()
 
-	fmt.Fprintf(os.Stderr, "proxy: pass-through for %s on %s -> %s (clock domain %s)\n",
-		parsedCell, *listen, *backend, clock.ID)
+	// The line names the factor level rather than the cell alone, because the two
+	// behaviours differ in exactly the way the experiment is measuring and an
+	// operator reading a log should not have to know the contract table.
+	mode := "pass-through"
+	if parsedCell.AggregatesEnvelopes() {
+		mode = fmt.Sprintf("cohort formation at B=%d, deadline %s", *targetB, formationDeadline)
+	}
+	fmt.Fprintf(os.Stderr, "proxy: %s for %s on %s -> %s (clock domain %s)\n",
+		mode, parsedCell, *listen, *backend, clock.ID)
 	if err := server.Serve(lis); err != nil {
 		return fmt.Errorf("proxy: serve: %w", err)
 	}

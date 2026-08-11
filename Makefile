@@ -71,6 +71,10 @@ generate: ## Regenerate protobuf code (committed, per CODEBASE.md §6)
 test: ## Unit and offline tests (no Triton required)
 	$(GO) test ./...
 
+.PHONY: test-race
+test-race: ## The same tests under the race detector
+	$(GO) test -race ./...
+
 .PHONY: test-models
 test-models: ## Model generator tests, including the naive-echo counter-fixture
 	$(UV) run --project tools/modelgen pytest tools/modelgen/tests -q
